@@ -3,6 +3,8 @@
 History-Aware Transformation for Re-Identification features.
 R&D repository for testing HAT-LDA before sauron-services integration.
 
+![HAT-ReID Tracking Demo](assets/image.png)
+
 ## Quick Start
 
 ```bash
