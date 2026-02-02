@@ -3,7 +3,7 @@
 History-Aware Transformation for Re-Identification features.
 R&D repository for testing HAT-LDA before sauron-services integration.
 
-https://github.com/dflo-ai/sauron_research/raw/master/assets/demo_tracked.mp4
+![HAT-ReID Tracking Demo](assets/demo_tracked.gif)
 
 ## Quick Start
 
