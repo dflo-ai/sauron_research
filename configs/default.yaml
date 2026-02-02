@@ -1,0 +1,22 @@
+hat:
+  use_shrinkage: true
+  use_weighted_class_mean: true
+  weighted_class_mean_alpha: 1.0
+  history_queue_type: "fifo"  # "fifo" or "score"
+  history_max_len: 600
+  history_weight_decay: 0.7
+  transfer_factor_threshold: 3.0
+
+tracker:
+  match_score_threshold: 0.5
+  init_score_threshold: 0.6
+  max_lost_frames: 1000
+  memo_momentum: 0.6
+  similarity_mode: "masa"  # "cosine", "bisoftmax", "masa"
+
+embedding:
+  model: "resnet50"
+  dim: 512
+  normalize: true
+  input_size: [512, 256]  # H, W
+  min_confidence: 0.6     # Only extract ReID for detections above this threshold

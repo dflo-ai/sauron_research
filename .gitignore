@@ -1,0 +1,109 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Data files (Shared & Symlinked)
+data/
+ramen_images/
+videos/
+screen/
+
+# Weight cache (auto-generated, environment-specific)
+# Note: .pt files are now tracked (weights/yolo11s.pt, weights/yolo11n.pt)
+weights/onnx/*.onnx
+weights/tensorrt/*.engine
+weights/tensorrt/*.json
+weights/openvino/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+.claude
+.opencode
+.mypy_cache
+
+# Environment files (never commit secrets)
+.env
+.env.local
+.env.*.local
+
+# PostgreSQL data (if mounting locally for dev)
+postgres_data/
+postgres_prod_data/
+actions-runner/
+
+# Dependencies
+node_modules/
+.pnpm-store/
+.npm/
+
+# Build
+.next/
+dist/
+build/
+
+# Testing
+.pytest_cache/
+htmlcov/
+coverage/
+
+# Misc
+.DS_Store
+
+# Experiments
+VLM_experiments/
+tmp
+
+.repomixignore
+AGENTS.md
+CLAUDE.md
+release-manifest.json
+plans/
+.hf_cache/
+.agent
+research
+
+# Claude Code outputs
+.claude/outputs/
+
+# Test outputs and scripts
+outputs/
+table_status/scripts/
+
+# Large model weights (download separately)
+weights/
+.mcp.json
+deploy/topic_branch/deployments.json
