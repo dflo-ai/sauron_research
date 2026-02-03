@@ -824,6 +824,118 @@ def compute_adaptive_cost_matrix(
     return cost_matrix
 
 
+# =============================================================================
+# Rank-List Majority Voting (Triplet-Loss Style)
+# Euclidean distance-based ranking with majority voting for identity confirmation
+# =============================================================================
+
+
+def compute_euclidean_rank_list(
+    query_feat: np.ndarray,
+    gallery_features: dict[int, list[np.ndarray]],
+    k: int = 20,
+) -> list[tuple[int, float, int]]:
+    """Compute top-k rank list by euclidean distance.
+
+    For triplet-loss trained models, euclidean distance is the natural metric.
+    Returns all feature distances, sorted ascending, allowing majority voting
+    to count matches/non-matches per ID.
+
+    Args:
+        query_feat: (D,) query feature vector
+        gallery_features: {track_id: [feat1, feat2, ...]}
+        k: Number of top entries to return (max 50)
+
+    Returns:
+        List of (track_id, distance, feature_count_for_id) sorted ascending by distance.
+        Same track_id can appear multiple times (once per feature).
+    """
+    if not gallery_features:
+        return []
+
+    k = min(k, 50)  # Cap at 50 per spec
+    all_distances: list[tuple[int, float, int]] = []  # (id, dist, total_count_for_id)
+
+    query = query_feat.reshape(1, -1)  # (1, D)
+
+    for track_id, feat_list in gallery_features.items():
+        if not feat_list:
+            continue
+
+        # Stack all features for this ID
+        feats = np.array(feat_list)  # (N, D)
+        feat_count = len(feat_list)
+
+        # Compute euclidean distances: ||q - f||^2 for each feature
+        dists_sq = euclidean_squared_distance_np(query, feats)[0]  # (N,)
+
+        # Add each feature's distance to the list
+        for dist_sq in dists_sq:
+            all_distances.append((track_id, float(np.sqrt(dist_sq)), feat_count))
+
+    # Sort by distance ascending (closest first)
+    all_distances.sort(key=lambda x: x[1])
+
+    # Return top-k
+    return all_distances[:k]
+
+
+def majority_vote_reidentify(
+    rank_list: list[tuple[int, float, int]],
+    distance_threshold: float | None = None,
+    min_entries_per_id: int = 2,
+) -> tuple[int | None, float]:
+    """Apply majority voting on rank list to confirm identity.
+
+    Counts features per ID in rank list. If matches > non_matches for any ID,
+    that ID wins. Uses adaptive threshold (median) if not specified.
+
+    Args:
+        rank_list: [(track_id, distance, feature_count)] sorted by distance
+        distance_threshold: Max distance to count as "match" (auto if None)
+        min_entries_per_id: Minimum entries required for voting (default 2)
+
+    Returns:
+        (best_id, confidence) or (None, 0.0) if no majority
+    """
+    if not rank_list:
+        return (None, 0.0)
+
+    # Auto-compute threshold as median distance in rank list
+    if distance_threshold is None:
+        distances = [r[1] for r in rank_list]
+        distance_threshold = float(np.median(distances))
+
+    # Group rank list entries by ID
+    # Note: same ID can appear multiple times if we expand rank list with all features
+    # But our rank list already aggregates per ID, so this groups entries
+    id_distances: dict[int, list[float]] = {}
+    for track_id, dist, _ in rank_list:
+        id_distances.setdefault(track_id, []).append(dist)
+
+    # Vote per ID
+    candidates: list[tuple[int, float, int]] = []  # (id, confidence, match_count)
+    for track_id, distances in id_distances.items():
+        # Skip IDs with too few entries
+        if len(distances) < min_entries_per_id:
+            continue
+
+        matches = sum(1 for d in distances if d < distance_threshold)
+        non_matches = len(distances) - matches
+
+        # Majority: matches > non_matches
+        if matches > non_matches:
+            confidence = matches / len(distances)
+            candidates.append((track_id, confidence, matches))
+
+    if not candidates:
+        return (None, 0.0)
+
+    # Select best candidate: most matches, then highest confidence
+    best = max(candidates, key=lambda x: (x[2], x[1]))
+    return (best[0], best[1])
+
+
 def validate_assignments_batch(
     assignments: list[tuple[int | None, float]],
     detection_positions: list[tuple[float, float]],
