@@ -99,6 +99,10 @@ class GalleryConfig(BaseModel):
     motion_max_distance: float = 150.0  # Max distance from prediction (pixels)
     motion_direction_threshold: float = 120.0  # Max angle change (degrees)
 
+    # Tentative track confirmation (require N frames before permanent ID)
+    min_frames_for_id: int = 5  # Min consecutive frames before assigning permanent ID
+    tentative_max_age: int = 10  # Max frames to keep unconfirmed tentative track
+
 
 class VisualizationConfig(BaseModel):
     """Visualization configuration for video output."""

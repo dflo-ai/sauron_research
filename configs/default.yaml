@@ -24,7 +24,7 @@ gallery:
   # Rank-list majority voting (triplet-loss style)
   rank_list_size: 20               # Top-k entries in rank list
   rank_distance_threshold: 1.0     # Fixed threshold for voting
-  rank_min_entries_per_id: 3       # Min features before voting kicks in
+  rank_min_entries_per_id: 2       # Min features before voting kicks in
   rank_fallback_threshold: 2.0     # Distance threshold for matching (max for L2-normalized)
 
   # Simplified k-reciprocal re-ranking (+3-5% mAP)
@@ -34,8 +34,8 @@ gallery:
 
   # Full k-reciprocal with Jaccard distance (CVPR 2017, +5-15% accuracy)
   use_full_reranking: true         # Full algorithm (recommended)
-  rerank_k1: 20                    # Initial k for R(p,k1)
-  rerank_k2: 6                     # Expansion k for R*(p,k1)
+  rerank_k1: 10                    # Initial k for R(p,k1)
+  rerank_k2: 5                     # Expansion k for R*(p,k1)
   rerank_lambda: 0.3               # Weight for original distance
 
   # Quality-aware feature fusion (+2-3% in occlusion)
@@ -44,7 +44,7 @@ gallery:
   quality_confidence_weight: 0.6   # Weight for detection confidence
   quality_geometry_weight: 0.4     # Weight for bbox geometry
   ideal_aspect_ratio: 0.4          # Typical person W/H ratio
-  min_bbox_area: 2000              # Minimum pixels for valid detection
+  min_bbox_area: 1000              # Minimum pixels for valid detection
 
   # Velocity-based temporal consistency (-15-30% ID switches)
   use_velocity_prediction: true    # Motion prediction (recommended)
@@ -52,6 +52,10 @@ gallery:
   velocity_max_speed: 100.0        # Max pixels/frame (clamp outliers)
   prediction_radius: 75.0          # Match radius around prediction
   prediction_boost: 0.01           # Reduced to prevent ID theft when people cross paths
+
+  # Tentative track confirmation (prevents spurious IDs)
+  min_frames_for_id: 5             # Min consecutive frames before permanent ID
+  tentative_max_age: 10            # Max frames to keep unconfirmed tentative track
 
   # Legacy temporal consistency (deprecated - use velocity_prediction)
   use_temporal_consistency: false  # Position-hash based (legacy)

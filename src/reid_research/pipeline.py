@@ -81,6 +81,13 @@ class VideoReIDPipeline:
         self._track_bboxes: dict[int, tuple[tuple[float, ...], int]] = {}
         self._iou_threshold = 0.3  # Min IoU to continue track
 
+        # Tentative track system: require N frames before permanent ID
+        self._min_frames_for_id = config.gallery.min_frames_for_id
+        self._tentative_max_age = config.gallery.tentative_max_age
+        # tentative_id -> {bbox, features, frame_count, first_frame, crops}
+        self._tentative_tracks: dict[int, dict] = {}
+        self._next_tentative_id = -1  # Negative IDs for tentative tracks
+
         # Extended frame renderer (analytics outside video)
         self._extended_renderer = ExtendedFrameRenderer(config.visualization)
         self._recent_matches: list[dict] = []  # Track recent ID matches for bottom bar
@@ -89,6 +96,7 @@ class VideoReIDPipeline:
         """Process single frame: detect -> extract -> match.
 
         Uses batch matching to ensure unique IDs per frame.
+        New detections must be seen for 5 frames before getting permanent ID.
 
         Args:
             frame: BGR numpy array
@@ -118,7 +126,7 @@ class VideoReIDPipeline:
         bboxes = [det.bbox for det in detections]
         current_frame = self.gallery._frame_idx
 
-        # First: try IoU-based continuation for recent tracks (within 5 frames)
+        # First: try IoU-based continuation for permanent tracks (within 5 frames)
         iou_matched: dict[int, int] = {}  # det_idx -> track_id
         used_tracks = set()
         for det_idx, bbox in enumerate(bboxes):
@@ -135,6 +143,25 @@ class VideoReIDPipeline:
                 iou_matched[det_idx] = best_tid
                 used_tracks.add(best_tid)
 
+        # Try IoU continuation for tentative tracks
+        tentative_iou_matched: dict[int, int] = {}  # det_idx -> tentative_id
+        used_tentative = set()
+        for det_idx, bbox in enumerate(bboxes):
+            if det_idx in iou_matched:  # Already matched to permanent track
+                continue
+            best_iou, best_tid = 0.0, None
+            for tid, track_data in self._tentative_tracks.items():
+                if tid in used_tentative:
+                    continue
+                if current_frame - track_data["last_frame"] > 5:  # Skip stale
+                    continue
+                iou = self._compute_iou(bbox, track_data["bbox"])
+                if iou > best_iou and iou >= self._iou_threshold:
+                    best_iou, best_tid = iou, tid
+            if best_tid is not None:
+                tentative_iou_matched[det_idx] = best_tid
+                used_tentative.add(best_tid)
+
         # Get recent IDs BEFORE match_batch updates temporal history
         recent_ids = [self.gallery.get_recent_id(bbox) for bbox in bboxes]
 
@@ -143,7 +170,7 @@ class VideoReIDPipeline:
         matched_ids = [r[0] for r in results]
         similarities = [r[1] for r in results]
 
-        # Override with IoU matches where applicable
+        # Override with IoU matches where applicable (permanent tracks only)
         for det_idx, tid in iou_matched.items():
             if matched_ids[det_idx] is None:
                 matched_ids[det_idx] = tid
@@ -168,58 +195,98 @@ class VideoReIDPipeline:
 
         # Stage 3: Assign IDs and update gallery (Track)
         self._current_stage = 3
-        for det, matched_id, recent_id, similarity, q_score in zip(
+        for det_idx, (det, matched_id, recent_id, similarity, q_score) in enumerate(zip(
             detections, matched_ids, recent_ids, similarities, quality_scores
-        ):
+        )):
             det.match_similarity = similarity
             # Get top 3 similar IDs (excluding matched ID)
             det.top_similar = self.gallery.get_top_similar(
                 det.features, exclude_id=matched_id, top_k=3
             )
             frame_idx = self.gallery._frame_idx
-            if matched_id is None:
-                det.track_id = self.gallery.add(
-                    det.features, quality_score=q_score, bbox=det.bbox
-                )
-                det.is_matched = False  # New person
-                # Start animation for new ID
-                self._match_animations[det.track_id] = 0
-                # Add event to ticker
-                self._hud_renderer.add_event(f"ID#{det.track_id} new", frame_idx, "new")
-                # Track for extended frame bottom bar
-                self._recent_matches.append({"id": det.track_id, "similarity": 0.0, "is_new": True})
-                if len(self._recent_matches) > 20:
-                    self._recent_matches.pop(0)
-            else:
+
+            if matched_id is not None:
+                # ReID matched to existing gallery entry - assign permanent ID
                 det.track_id = matched_id
-                det.is_matched = True  # ReID match found
-                # Add event to ticker
+                det.is_matched = True
                 self._hud_renderer.add_event(f"ID#{det.track_id} matched", frame_idx, "match")
-                # Track for extended frame bottom bar (estimate similarity)
                 self._recent_matches.append({"id": det.track_id, "similarity": similarity, "is_new": False})
                 if len(self._recent_matches) > 20:
                     self._recent_matches.pop(0)
 
-                # Set recovery flag if track was lost spatially
                 if recent_id is None:
                     det.is_recovery = True
 
-                # Detect if this is a rematch from a DIFFERENT previous ID
                 if recent_id is not None and recent_id != matched_id:
                     det.previous_id = recent_id
                     prev_entry = self.gallery.get_entry(recent_id)
                     if prev_entry:
                         det.previous_id_timestamp = prev_entry.last_seen
 
-                self.gallery.update(
-                    matched_id, det.features, quality_score=q_score, bbox=det.bbox
-                )
-                # Reset animation on re-match
+                self.gallery.update(matched_id, det.features, quality_score=q_score, bbox=det.bbox)
                 self._match_animations[matched_id] = 0
-
-            # Update track bbox for IoU continuation
-            if det.track_id is not None:
                 self._track_bboxes[det.track_id] = (det.bbox, frame_idx)
+
+                # If this detection was previously tentative, remove it
+                if det_idx in tentative_iou_matched:
+                    tent_id = tentative_iou_matched[det_idx]
+                    if tent_id in self._tentative_tracks:
+                        del self._tentative_tracks[tent_id]
+
+            elif det_idx in tentative_iou_matched:
+                # Continue existing tentative track
+                tent_id = tentative_iou_matched[det_idx]
+                track_data = self._tentative_tracks[tent_id]
+                track_data["frame_count"] += 1
+                track_data["bbox"] = det.bbox
+                track_data["last_frame"] = frame_idx
+                track_data["features"] = det.features  # Keep latest features
+                track_data["crops"].append(det.crop)
+                if len(track_data["crops"]) > 10:
+                    track_data["crops"].pop(0)
+
+                # Check if ready to promote to permanent ID
+                if track_data["frame_count"] >= self._min_frames_for_id:
+                    # Promote: add to gallery with accumulated features
+                    det.track_id = self.gallery.add(
+                        det.features, quality_score=q_score, bbox=det.bbox
+                    )
+                    det.is_matched = False
+                    self._match_animations[det.track_id] = 0
+                    self._hud_renderer.add_event(f"ID#{det.track_id} new", frame_idx, "new")
+                    self._recent_matches.append({"id": det.track_id, "similarity": 0.0, "is_new": True})
+                    if len(self._recent_matches) > 20:
+                        self._recent_matches.pop(0)
+                    self._track_bboxes[det.track_id] = (det.bbox, frame_idx)
+                    # Remove from tentative
+                    del self._tentative_tracks[tent_id]
+                else:
+                    # Still tentative - use negative ID for visualization
+                    det.track_id = tent_id
+                    det.is_matched = False
+
+            else:
+                # New detection - create tentative track
+                tent_id = self._next_tentative_id
+                self._next_tentative_id -= 1
+                self._tentative_tracks[tent_id] = {
+                    "bbox": det.bbox,
+                    "features": det.features,
+                    "frame_count": 1,
+                    "first_frame": frame_idx,
+                    "last_frame": frame_idx,
+                    "crops": [det.crop],
+                }
+                det.track_id = tent_id  # Negative ID indicates tentative
+                det.is_matched = False
+
+        # Prune stale tentative tracks (not seen for >tentative_max_age frames)
+        stale_tentative = [
+            tid for tid, data in self._tentative_tracks.items()
+            if current_frame - data["last_frame"] > self._tentative_max_age
+        ]
+        for tid in stale_tentative:
+            del self._tentative_tracks[tid]
 
         return detections
 
@@ -240,16 +307,63 @@ class VideoReIDPipeline:
         area2 = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1])
         return inter / (area1 + area2 - inter)
 
+    def _draw_dashed_rect(
+        self,
+        img: np.ndarray,
+        pt1: tuple[int, int],
+        pt2: tuple[int, int],
+        color: tuple[int, int, int],
+        thickness: int = 2,
+        dash_length: int = 10,
+    ) -> None:
+        """Draw a dashed rectangle on image."""
+        x1, y1 = pt1
+        x2, y2 = pt2
+        # Top edge
+        self._draw_dashed_line(img, (x1, y1), (x2, y1), color, thickness, dash_length)
+        # Bottom edge
+        self._draw_dashed_line(img, (x1, y2), (x2, y2), color, thickness, dash_length)
+        # Left edge
+        self._draw_dashed_line(img, (x1, y1), (x1, y2), color, thickness, dash_length)
+        # Right edge
+        self._draw_dashed_line(img, (x2, y1), (x2, y2), color, thickness, dash_length)
+
+    def _draw_dashed_line(
+        self,
+        img: np.ndarray,
+        pt1: tuple[int, int],
+        pt2: tuple[int, int],
+        color: tuple[int, int, int],
+        thickness: int = 2,
+        dash_length: int = 10,
+    ) -> None:
+        """Draw a dashed line on image."""
+        x1, y1 = pt1
+        x2, y2 = pt2
+        dx = x2 - x1
+        dy = y2 - y1
+        dist = max(1, int((dx**2 + dy**2) ** 0.5))
+        for i in range(0, dist, dash_length * 2):
+            start = i / dist
+            end = min((i + dash_length) / dist, 1.0)
+            sx = int(x1 + dx * start)
+            sy = int(y1 + dy * start)
+            ex = int(x1 + dx * end)
+            ey = int(y1 + dy * end)
+            cv2.line(img, (sx, sy), (ex, ey), color, thickness)
+
     def process_video(
         self,
         video_path: str | Path,
         output_path: str | Path | None = None,
+        max_frames: int | None = None,
     ) -> dict:
-        """Process entire video file.
+        """Process video file.
 
         Args:
             video_path: Input video path
             output_path: Output video path (optional)
+            max_frames: Maximum frames to process (optional)
 
         Returns:
             Processing statistics dict
@@ -265,6 +379,8 @@ class VideoReIDPipeline:
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if max_frames is not None:
+            total_frames = min(total_frames, max_frames)
 
         # Output writer - use extended dimensions if enabled
         writer = None
@@ -285,17 +401,17 @@ class VideoReIDPipeline:
         pbar = tqdm(total=total_frames, desc="Processing", unit="frame")
         while True:
             ret, frame = cap.read()
-            if not ret:
+            if not ret or (max_frames is not None and stats["frames"] >= max_frames):
                 break
 
             detections = self.process_frame(frame)
             stats["frames"] += 1
             stats["detections"] += len(detections)
 
-            # Count ReID matches and unique IDs
+            # Count ReID matches and unique IDs (exclude tentative tracks with negative IDs)
             frame_matches = 0
             for det in detections:
-                if det.track_id is not None:
+                if det.track_id is not None and det.track_id >= 0:
                     stats["unique_ids"].add(det.track_id)
                 if det.is_matched:
                     frame_matches += 1
@@ -385,9 +501,9 @@ class VideoReIDPipeline:
         vis = frame.copy()
         active_ids = set()
 
-        # Update thumbnail cache and collect active IDs
+        # Update thumbnail cache and collect active IDs (skip tentative tracks)
         for det in detections:
-            if det.track_id is not None:
+            if det.track_id is not None and det.track_id >= 0:
                 active_ids.add(det.track_id)
                 self._update_thumbnail_cache(det)
 
@@ -395,8 +511,13 @@ class VideoReIDPipeline:
             x1, y1, x2, y2 = map(int, det.bbox)
             track_id = det.track_id if det.track_id is not None else -1
 
+            # Skip tentative tracks (negative IDs) in visualization
+            # Or show them with a distinct style (dashed/gray)
+            is_tentative = track_id < 0
+
             # Consistent color per ID using Okabe-Ito palette
-            color = get_id_color(track_id)
+            # Use gray for tentative tracks
+            color = (128, 128, 128) if is_tentative else get_id_color(track_id)
 
             # Animated fill effect (fades from 30% to 0% over FADE_DURATION frames)
             anim_frame = self._match_animations.get(track_id, self.FADE_DURATION)
@@ -420,11 +541,16 @@ class VideoReIDPipeline:
                 cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
                 vis = cv2.addWeighted(overlay, opacity, vis, 1 - opacity, 0)
 
-            # Draw box border
-            cv2.rectangle(vis, (x1, y1), (x2, y2), color, thickness)
+            # Draw box border (dashed for tentative)
+            if is_tentative:
+                # Draw dashed rectangle for tentative tracks
+                self._draw_dashed_rect(vis, (x1, y1), (x2, y2), color, thickness)
+            else:
+                cv2.rectangle(vis, (x1, y1), (x2, y2), color, thickness)
 
             # Modified label logic: Move ID to middle, remove status labels
-            label = f"ID:{track_id:02d}"
+            # Show "?" for tentative tracks
+            label = "?" if is_tentative else f"ID:{track_id:02d}"
             
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
@@ -435,8 +561,8 @@ class VideoReIDPipeline:
                 vis, label, (cx - tw // 2, cy + th // 2 + 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2
             )
 
-            # Show top 3 similar IDs below bbox
-            if det.top_similar:
+            # Show top 3 similar IDs below bbox (skip for tentative tracks)
+            if det.top_similar and not is_tentative:
                 y_offset = y2 + 15
                 for sim_id, sim_score in det.top_similar[:3]:
                     sim_label = f"~ID:{sim_id:02d}: {sim_score*100:.0f}%"
