@@ -13,7 +13,7 @@ model:
 
 inference:
   image_size: [512, 256]           # ReID crop size (H, W)
-  batch_size: 64                   # Feature extraction batch
+  batch_size: 32                   # Feature extraction batch
   confidence_threshold: 0.8        # YOLO detection confidence
   similarity_threshold: 0.8        # ReID cosine similarity (stricter to prevent ID theft)
 

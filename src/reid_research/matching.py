@@ -832,11 +832,12 @@ def validate_assignments_batch(
     crossing_ids: set[int],
     max_distance: float = 150.0,
     direction_threshold_deg: float = 120.0,
+    high_similarity_threshold: float = 0.7,
 ) -> list[tuple[int | None, float]]:
     """Validate batch of assignments against motion consistency.
 
     Rejects assignments where motion is inconsistent with track history.
-    Crossing tracks are exempt from validation (expect direction changes).
+    Exemptions: crossing tracks, high-similarity matches, no prediction.
 
     Args:
         assignments: List of (track_id, similarity) tuples
@@ -846,6 +847,7 @@ def validate_assignments_batch(
         crossing_ids: Tracks currently crossing (exempt from validation)
         max_distance: Max allowed distance from prediction
         direction_threshold_deg: Max angle difference
+        high_similarity_threshold: Above this similarity, trust appearance over motion
 
     Returns:
         List of validated (track_id, similarity) tuples (None for rejected)
@@ -855,6 +857,12 @@ def validate_assignments_batch(
     for i, (track_id, sim) in enumerate(assignments):
         if track_id is None:
             validated.append((None, 0.0))
+            continue
+
+        # High-similarity matches: trust appearance over motion
+        # RE-ID appearance match is more reliable than position prediction
+        if sim >= high_similarity_threshold:
+            validated.append((track_id, sim))
             continue
 
         # Skip validation for crossing tracks (expect erratic motion)
