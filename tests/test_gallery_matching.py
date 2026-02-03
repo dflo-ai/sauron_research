@@ -139,11 +139,12 @@ def test_batch_match_unique_ids(gallery):
     query2 = feat2.copy()
 
     # Batch match should assign different IDs
+    # Returns list of (track_id, similarity) tuples
     matched = gallery.match_batch([query1, query2])
 
-    assert matched[0] == id1
-    assert matched[1] == id2
-    assert matched[0] != matched[1]
+    assert matched[0][0] == id1  # First element is track_id
+    assert matched[1][0] == id2
+    assert matched[0][0] != matched[1][0]
 
 
 def test_batch_match_no_duplicates(gallery):
@@ -160,8 +161,11 @@ def test_batch_match_no_duplicates(gallery):
 
     gallery.config.inference.similarity_threshold = 0.5
 
+    # Returns list of (track_id, similarity) tuples
     matched = gallery.match_batch([query1, query2])
+    matched_ids = [m[0] for m in matched]
 
-    # First query gets the match, second gets None (no duplicate assignment)
-    assert matched[0] == gallery_id
-    assert matched[1] is None  # Cannot match same ID twice
+    # With Hungarian algorithm, exactly one query should match (order may vary)
+    # Key: no duplicate assignment - only one match allowed
+    assert matched_ids.count(gallery_id) == 1, "Gallery ID should appear exactly once"
+    assert matched_ids.count(None) == 1, "One query should be unmatched"

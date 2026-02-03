@@ -73,6 +73,26 @@ class GalleryConfig(BaseModel):
     adaptive_target_percentile: float = 0.15  # Target false positive rate
     adaptive_warmup_matches: int = 20  # Minimum matches before adapting
 
+    # Crossing detection (Phase 2)
+    use_crossing_detection: bool = True  # Enable crossing detection
+    crossing_detection_radius: float = 100.0  # Distance threshold for crossing (pixels)
+    crossing_iou_threshold: float = 0.1  # IoU threshold for bbox overlap detection
+    crossing_threshold_boost: float = 0.6  # Stricter similarity threshold during crossing
+    crossing_boost_reduction: float = 0.3  # Reduce position boost to 30% during crossing
+    rerank_on_crossing: bool = True  # Apply full torchreid re-ranking during crossing
+
+    # Adaptive cost matrix (Phase 3)
+    use_adaptive_cost_matrix: bool = False  # Use adaptive cost matrix vs simple 1-sim
+    weight_appearance: float = 0.7  # Appearance weight (normal)
+    weight_motion: float = 0.3  # Motion weight (normal)
+    weight_appearance_crossing: float = 0.9  # Appearance weight (crossing)
+    weight_motion_crossing: float = 0.1  # Motion weight (crossing)
+
+    # Motion consistency validation (Phase 5)
+    use_motion_validation: bool = True  # Validate assignments against motion history
+    motion_max_distance: float = 150.0  # Max distance from prediction (pixels)
+    motion_direction_threshold: float = 120.0  # Max angle change (degrees)
+
 
 class VisualizationConfig(BaseModel):
     """Visualization configuration for video output."""

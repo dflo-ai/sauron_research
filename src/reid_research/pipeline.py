@@ -121,7 +121,9 @@ class VideoReIDPipeline:
         # Get recent IDs BEFORE match_batch updates temporal history
         recent_ids = [self.gallery.get_recent_id(bbox) for bbox in bboxes]
 
-        matched_ids = self.gallery.match_batch(features_list, bboxes=bboxes)
+        results = self.gallery.match_batch(features_list, bboxes=bboxes)
+        matched_ids = [r[0] for r in results]
+        similarities = [r[1] for r in results]
 
         # Compute quality scores for each detection
         gallery_cfg = self.config.gallery
@@ -142,9 +144,10 @@ class VideoReIDPipeline:
 
         # Stage 3: Assign IDs and update gallery (Track)
         self._current_stage = 3
-        for det, matched_id, recent_id, q_score in zip(
-            detections, matched_ids, recent_ids, quality_scores
+        for det, matched_id, recent_id, similarity, q_score in zip(
+            detections, matched_ids, recent_ids, similarities, quality_scores
         ):
+            det.match_similarity = similarity
             frame_idx = self.gallery._frame_idx
             if matched_id is None:
                 det.track_id = self.gallery.add(
@@ -165,9 +168,13 @@ class VideoReIDPipeline:
                 # Add event to ticker
                 self._hud_renderer.add_event(f"ID#{det.track_id} matched", frame_idx, "match")
                 # Track for extended frame bottom bar (estimate similarity)
-                self._recent_matches.append({"id": det.track_id, "similarity": 0.85, "is_new": False})
+                self._recent_matches.append({"id": det.track_id, "similarity": similarity, "is_new": False})
                 if len(self._recent_matches) > 20:
                     self._recent_matches.pop(0)
+
+                # Set recovery flag if track was lost spatially
+                if recent_id is None:
+                    det.is_recovery = True
 
                 # Detect if this is a rematch from a DIFFERENT previous ID
                 if recent_id is not None and recent_id != matched_id:
@@ -367,24 +374,28 @@ class VideoReIDPipeline:
             # Draw box border
             cv2.rectangle(vis, (x1, y1), (x2, y2), color, thickness)
 
-            # Determine state for label
-            state = ""
-            if anim_frame == 0:
-                state = "INIT" if not det.is_matched else "ReID!"
-            elif anim_frame < self.FADE_DURATION:
-                state = "NEW" if not det.is_matched else "ReID"
-
-            # Main label
+            # Modified label logic: Move ID to middle, remove status labels
             label = f"ID:{track_id:02d}"
-            if state:
-                label += f" [{state}]"
             
-            # Draw main label background and text
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-            cv2.rectangle(vis, (x1, y1 - th - 10), (x1 + tw + 4, y1), color, -1)
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            
+            # Draw label background and text in the middle
+            cv2.rectangle(vis, (cx - tw // 2 - 4, cy - th // 2 - 4), (cx + tw // 2 + 4, cy + th // 2 + 4), color, -1)
             cv2.putText(
-                vis, label, (x1 + 2, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2
+                vis, label, (cx - tw // 2, cy + th // 2 + 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2
             )
+
+            # Show similarity if recovery: "similar to ID:XX n%"
+            rematch_frames = self.fps * self.REMATCH_DISPLAY_SECONDS
+            if det.is_recovery and anim_frame < rematch_frames:
+                recovery_label = f"similar to ID:{track_id:02d} {det.match_similarity*100:.0f}%"
+                (rw, rh), _ = cv2.getTextSize(recovery_label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                # Draw below the main ID in the middle
+                cv2.rectangle(vis, (cx - rw // 2 - 4, cy + th // 2 + 5), (cx + rw // 2 + 4, cy + th // 2 + rh + 12), (0, 0, 0), -1)
+                cv2.putText(
+                    vis, recovery_label, (cx - rw // 2, cy + th // 2 + rh + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 100), 1
+                )
 
             # Draw rematch info: [ID:10 (00:10) --> ID:01 (00:11)]
             # Show rematch info for REMATCH_DISPLAY_SECONDS
@@ -395,10 +406,10 @@ class VideoReIDPipeline:
                 rematch_label = f"[ID:{det.previous_id:02d} ({prev_time}) --> ID:{track_id:02d} ({curr_time})]"
                 
                 (rtw, rth), _ = cv2.getTextSize(rematch_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                # Draw above the main label
-                cv2.rectangle(vis, (x1, y1 - th - rth - 20), (x1 + rtw + 4, y1 - th - 10), (0, 0, 0), -1)
+                # Draw directly above bbox since main label moved to middle
+                cv2.rectangle(vis, (x1, y1 - rth - 10), (x1 + rtw + 4, y1), (0, 0, 0), -1)
                 cv2.putText(
-                    vis, rematch_label, (x1 + 2, y1 - th - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1
+                    vis, rematch_label, (x1 + 2, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1
                 )
 
         # Step animation counters

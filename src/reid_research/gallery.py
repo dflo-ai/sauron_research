@@ -4,18 +4,24 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import lap
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
 from .config import ReIDConfig
 from .matching import (
     TrackMotion,
+    apply_torchreid_reranking,
+    compute_adaptive_cost_matrix,
     compute_adaptive_threshold,
     compute_k_reciprocal_reranking,
     compute_position_boost,
     compute_quality_score,
     compute_velocity,
+    detect_crossing_tracks,
     predict_position,
+    validate_assignments_batch,
+    validate_motion_consistency,
 )
 
 
@@ -99,7 +105,7 @@ class PersonGallery:
             return []
 
         if not self._gallery:
-            return [None] * len(features_list)
+            return [(None, 0.0)] * len(features_list)
 
         exclude_ids = exclude_ids or set()
         gallery_cfg = self.config.gallery
@@ -113,16 +119,25 @@ class PersonGallery:
             tid for tid in self._gallery.keys() if tid not in exclude_ids
         ]
         if not gallery_ids:
-            return [None] * len(features_list)
+            return [(None, 0.0)] * len(features_list)
 
         gallery_feats = np.array(
             [self._gallery[tid].avg_feature for tid in gallery_ids]
         )
         query_feats = np.array(features_list)
 
-        # Compute similarities - use full k-reciprocal or basic cosine
-        if gallery_cfg.use_full_reranking and len(gallery_ids) >= 10:
-            sim_matrix = compute_k_reciprocal_reranking(
+        # Detect crossing tracks (for adaptive behavior)
+        crossing_ids = self._detect_crossing_tracks(bboxes, gallery_ids)
+        is_crossing = len(crossing_ids) > 0
+
+        # Compute similarities - use torchreid reranking during crossing or when enabled
+        use_reranking = gallery_cfg.use_full_reranking and len(gallery_ids) >= 10
+        if is_crossing and gallery_cfg.rerank_on_crossing and len(gallery_ids) >= 10:
+            use_reranking = True  # Force reranking during crossing
+
+        if use_reranking:
+            # Official torchreid CVPR2017 re-ranking (most accurate)
+            sim_matrix = apply_torchreid_reranking(
                 query_feats,
                 gallery_feats,
                 k1=gallery_cfg.rerank_k1,
@@ -132,7 +147,7 @@ class PersonGallery:
         else:
             sim_matrix = cosine_similarity(query_feats, gallery_feats)
 
-            # Apply simplified k-reciprocal boost if enabled
+            # Apply simplified k-reciprocal boost if enabled (legacy)
             if gallery_cfg.use_reranking and len(gallery_ids) >= 10:
                 sim_matrix = self._apply_k_reciprocal_boost(
                     query_feats, gallery_feats, sim_matrix,
@@ -140,9 +155,10 @@ class PersonGallery:
                 )
 
         # Apply velocity-based temporal consistency (preferred)
+        # Reduce position boost during crossing to prevent ID theft
         if bboxes and gallery_cfg.use_velocity_prediction:
             sim_matrix = self._apply_velocity_consistency(
-                sim_matrix, bboxes, gallery_ids
+                sim_matrix, bboxes, gallery_ids, crossing_ids=crossing_ids
             )
         # Fallback to legacy position-hash method
         elif bboxes and gallery_cfg.use_temporal_consistency:
@@ -151,38 +167,84 @@ class PersonGallery:
                 sim_matrix, bbox_hashes, gallery_ids
             )
 
-        # Greedy assignment: each query gets best available gallery match
-        assigned_gallery_indices = set()
-        match_scores = []
+        # During crossing, use stricter threshold
+        if is_crossing:
+            threshold = max(threshold, gallery_cfg.crossing_threshold_boost)
+
+        # Get predicted positions for adaptive cost matrix
+        predictions = self._predict_track_positions()
+
+        # Compute cost matrix - use adaptive or simple
+        if gallery_cfg.use_adaptive_cost_matrix and bboxes:
+            det_positions = [
+                ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for b in bboxes
+            ]
+            cost_matrix = compute_adaptive_cost_matrix(
+                sim_matrix,
+                det_positions,
+                predictions,
+                gallery_ids,
+                crossing_ids,
+                weights_normal=(
+                    gallery_cfg.weight_appearance,
+                    gallery_cfg.weight_motion,
+                ),
+                weights_crossing=(
+                    gallery_cfg.weight_appearance_crossing,
+                    gallery_cfg.weight_motion_crossing,
+                ),
+            )
+        else:
+            # Simple: convert similarity to cost
+            cost_matrix = 1.0 - sim_matrix
+
+        # Run Hungarian algorithm via lap (faster than scipy)
+        # lap.lapjv returns (cost, row_to_col, col_to_row)
+        _, row_to_col, _ = lap.lapjv(cost_matrix, extend_cost=True)
+
+        # Build results, rejecting below-threshold matches
+        results = []  # List of (matched_id, similarity)
 
         for query_idx in range(len(features_list)):
+            gal_idx = row_to_col[query_idx]
             best_id = None
-            best_sim = threshold
-            best_gal_idx = -1
+            best_sim = 0.0
 
-            for gal_idx, gal_id in enumerate(gallery_ids):
-                if gal_idx in assigned_gallery_indices:
-                    continue
+            # Check if valid assignment and above threshold
+            if gal_idx >= 0 and gal_idx < len(gallery_ids):
                 sim = sim_matrix[query_idx, gal_idx]
-                if sim > best_sim:
+                if sim >= threshold:
+                    best_id = gallery_ids[gal_idx]
                     best_sim = sim
-                    best_id = gal_id
-                    best_gal_idx = gal_idx
+                    # Update adaptive threshold statistics
+                    if gallery_cfg.use_adaptive_threshold:
+                        self._update_similarity_stats([best_sim])
 
-            if best_id is not None:
-                assigned_gallery_indices.add(best_gal_idx)
-                match_scores.append(best_sim)
+            results.append((best_id, float(best_sim)))
 
-            results.append(best_id)
-
-        # Update adaptive threshold statistics
-        if gallery_cfg.use_adaptive_threshold and match_scores:
-            self._update_similarity_stats(match_scores)
+        # Motion consistency validation - reject suspicious assignments
+        if gallery_cfg.use_motion_validation and bboxes:
+            det_positions = [
+                ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for b in bboxes
+            ]
+            track_velocities = {
+                tid: motion.velocity
+                for tid, motion in self._track_motion.items()
+            }
+            results = validate_assignments_batch(
+                results,
+                det_positions,
+                predictions,
+                track_velocities,
+                crossing_ids,
+                max_distance=gallery_cfg.motion_max_distance,
+                direction_threshold_deg=gallery_cfg.motion_direction_threshold,
+            )
 
         # Update legacy temporal history
         if bboxes and gallery_cfg.use_temporal_consistency:
             bbox_hashes = [self._bbox_hash(b) for b in bboxes]
-            self._update_temporal_history(bbox_hashes, results)
+            self._update_temporal_history(bbox_hashes, [r[0] for r in results])
 
         return results
 
@@ -244,6 +306,7 @@ class PersonGallery:
         sim_matrix: np.ndarray,
         bboxes: list[tuple[float, ...]],
         gallery_ids: list[int],
+        crossing_ids: set[int] | None = None,
     ) -> np.ndarray:
         """Apply velocity-based position boost to similarity matrix.
 
@@ -251,6 +314,7 @@ class PersonGallery:
             sim_matrix: (Q, G) similarity scores
             bboxes: Bounding boxes for each query detection
             gallery_ids: List of gallery track IDs
+            crossing_ids: Set of track IDs currently in crossing state
 
         Returns:
             Adjusted similarity matrix
@@ -258,6 +322,7 @@ class PersonGallery:
         cfg = self.config.gallery
         predictions = self._predict_track_positions()
         adjusted = sim_matrix.copy()
+        crossing_ids = crossing_ids or set()
 
         # Minimum similarity required before applying position boost
         # Prevents ID theft when different-looking people cross paths
@@ -277,11 +342,19 @@ class PersonGallery:
                     continue
 
                 pred_pos = predictions[gal_id]
+
+                # Reduce position boost during crossing to prevent ID theft
+                # Appearance should dominate over position during crossing
+                if gal_id in crossing_ids:
+                    max_boost = cfg.prediction_boost * cfg.crossing_boost_reduction
+                else:
+                    max_boost = cfg.prediction_boost
+
                 boost = compute_position_boost(
                     (det_cx, det_cy),
                     pred_pos,
                     prediction_radius=cfg.prediction_radius,
-                    max_boost=cfg.prediction_boost,
+                    max_boost=max_boost,
                 )
                 adjusted[q_idx, g_idx] += boost
 
@@ -310,6 +383,84 @@ class PersonGallery:
             predictions[track_id] = pred_pos
 
         return predictions
+
+    def _detect_crossing_tracks(
+        self,
+        bboxes: list[tuple[float, ...]] | None,
+        gallery_ids: list[int],
+    ) -> set[int]:
+        """Detect which gallery tracks are currently crossing or about to cross.
+
+        Uses velocity convergence and bbox IoU overlap to detect crossings.
+
+        Args:
+            bboxes: Current detection bounding boxes (for IoU check)
+            gallery_ids: List of active gallery track IDs
+
+        Returns:
+            Set of track IDs involved in crossing
+        """
+        cfg = self.config.gallery
+        if not cfg.use_crossing_detection:
+            return set()
+
+        # Get predicted positions and velocities for gallery tracks
+        predictions = self._predict_track_positions()
+        track_positions = {
+            tid: predictions[tid] for tid in gallery_ids if tid in predictions
+        }
+        track_velocities = {
+            tid: self._track_motion[tid].velocity
+            for tid in gallery_ids
+            if tid in self._track_motion
+        }
+
+        # Get track bboxes from last known positions (approximate)
+        track_bboxes = None
+        if bboxes is not None:
+            # Use last known bboxes from motion tracking
+            # This is approximate - actual bbox tracking would be better
+            track_bboxes = self._get_track_bboxes(gallery_ids)
+
+        return detect_crossing_tracks(
+            track_positions,
+            track_velocities,
+            track_bboxes=track_bboxes,
+            crossing_radius=cfg.crossing_detection_radius,
+            iou_threshold=cfg.crossing_iou_threshold,
+        )
+
+    def _get_track_bboxes(
+        self, gallery_ids: list[int]
+    ) -> dict[int, tuple[float, float, float, float]]:
+        """Get approximate bounding boxes for gallery tracks.
+
+        Uses predicted center positions and assumes standard person dimensions.
+
+        Args:
+            gallery_ids: List of track IDs to get bboxes for
+
+        Returns:
+            Dict mapping track_id to (x1, y1, x2, y2) bbox
+        """
+        predictions = self._predict_track_positions()
+        track_bboxes = {}
+
+        # Approximate person dimensions (width, height)
+        default_w, default_h = 60, 150
+
+        for tid in gallery_ids:
+            if tid not in predictions:
+                continue
+
+            cx, cy = predictions[tid]
+            x1 = cx - default_w / 2
+            y1 = cy - default_h / 2
+            x2 = cx + default_w / 2
+            y2 = cy + default_h / 2
+            track_bboxes[tid] = (x1, y1, x2, y2)
+
+        return track_bboxes
 
     def _update_track_motion(
         self,
