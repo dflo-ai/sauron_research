@@ -1,22 +1,83 @@
-hat:
-  use_shrinkage: true
-  use_weighted_class_mean: true
-  weighted_class_mean_alpha: 1.0
-  history_queue_type: "fifo"  # "fifo" or "score"
-  history_max_len: 600
-  history_weight_decay: 0.7
-  transfer_factor_threshold: 3.0
+# ReID Research Module Configuration
+model:
+  reid_variant: "osnet_x1_0"       # osnet_x1_0 (validated: best accuracy)
+  reid_weights: null               # null = auto-download pretrained
+  yolo_weights: "weights/coco_l_1024_e500_t010_w005_best.pt"  # JointBDOE-L (largest available)
+  detector_type: "jointbdoe"       # "yolo" or "jointbdoe"
+  device: "cuda"                   # cuda (validated)
+  # FastReID configuration (SBS R50-ibn: 89.3% mAP, 2048-dim features)
+  use_fastreid: false              # Toggle FastReID vs OSNet
+  fastreid_config: "fast-reid/configs/Market1501/bagtricks_vit.yml"
+  fastreid_weights: "weights/market_sbs_R50-ibn.pth"
+  fastreid_input_size: [384, 128]  # H, W
 
-tracker:
-  match_score_threshold: 0.5
-  init_score_threshold: 0.6
-  max_lost_frames: 1000
-  memo_momentum: 0.6
-  similarity_mode: "masa"  # "cosine", "bisoftmax", "masa"
+inference:
+  image_size: [512, 256]           # ReID crop size (H, W)
+  batch_size: 64                   # Feature extraction batch
+  confidence_threshold: 0.8        # YOLO detection confidence
+  similarity_threshold: 0.65        # ReID cosine similarity (validated: stricter)
 
-embedding:
-  model: "resnet50"
-  dim: 512
-  normalize: true
-  input_size: [512, 256]  # H, W
-  min_confidence: 0.6     # Only extract ReID for detections above this threshold
+gallery:
+  max_features_per_id: 200         # Rolling window size
+  ema_alpha: 0.6                   # Feature update weight
+
+  # Simplified k-reciprocal re-ranking (+3-5% mAP)
+  use_reranking: false             # Simplified boost (superseded by full reranking)
+  rerank_k: 10                     # Neighbors for reciprocal check
+  rerank_boost: 0.2                # Similarity boost for matches
+
+  # Full k-reciprocal with Jaccard distance (CVPR 2017, +5-15% accuracy)
+  use_full_reranking: true         # Full algorithm (recommended)
+  rerank_k1: 20                    # Initial k for R(p,k1)
+  rerank_k2: 6                     # Expansion k for R*(p,k1)
+  rerank_lambda: 0.3               # Weight for original distance
+
+  # Quality-aware feature fusion (+2-3% in occlusion)
+  use_quality_weighting: true      # Weight features by detection quality
+  quality_min_threshold: 0.3       # Skip updates below this
+  quality_confidence_weight: 0.6   # Weight for detection confidence
+  quality_geometry_weight: 0.4     # Weight for bbox geometry
+  ideal_aspect_ratio: 0.4          # Typical person W/H ratio
+  min_bbox_area: 2000              # Minimum pixels for valid detection
+
+  # Velocity-based temporal consistency (-15-30% ID switches)
+  use_velocity_prediction: true    # Motion prediction (recommended)
+  velocity_history_frames: 5       # Frames to average velocity
+  velocity_max_speed: 100.0        # Max pixels/frame (clamp outliers)
+  prediction_radius: 75.0          # Match radius around prediction
+  prediction_boost: 0.15           # Similarity boost for position match
+
+  # Legacy temporal consistency (deprecated - use velocity_prediction)
+  use_temporal_consistency: false  # Position-hash based (legacy)
+  temporal_window: 5               # Frames to track history
+  temporal_boost: 0.2              # Boost for consistent matches
+
+  # Adaptive similarity threshold (-10-20% false positives)
+  use_adaptive_threshold: false    # Dynamic threshold adjustment
+  adaptive_min_threshold: 0.50     # Floor threshold
+  adaptive_max_threshold: 0.80     # Ceiling threshold
+  adaptive_window_size: 100        # Matches to track
+  adaptive_target_percentile: 0.15 # Target false positive rate
+  adaptive_warmup_matches: 20      # Minimum matches before adapting
+
+output:
+  save_video: true
+  save_tracks: true                # JSON track export
+  visualization: true              # Draw boxes + IDs
+
+visualization:
+  # Layout
+  gallery_panel_width: 200         # Width of gallery side panel in pixels
+  gallery_panel_position: "right"  # "left" or "right"
+  show_gallery_panel: true         # Show person thumbnails panel
+  show_pipeline_hud: true          # Show pipeline stage indicator
+  max_gallery_entries: 10          # Most recent entries to display
+
+  # Colors and styling
+  panel_bg_opacity: 0.75           # Background opacity for overlays
+  bbox_thickness_matched: 3        # Line thickness for ReID matches
+  bbox_thickness_unmatched: 2      # Line thickness for new detections
+
+  # Split view (educational mode)
+  split_view_enabled: false        # Show pipeline stages side-by-side
+  split_view_stages: ["detection", "reid"]
