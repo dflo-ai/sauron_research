@@ -77,6 +77,10 @@ class VideoReIDPipeline:
         # Split view renderer
         self._split_view_renderer = SplitViewRenderer(config.visualization)
 
+        # IoU-based track continuation: track_id -> (bbox, last_frame)
+        self._track_bboxes: dict[int, tuple[tuple[float, ...], int]] = {}
+        self._iou_threshold = 0.3  # Min IoU to continue track
+
         # Extended frame renderer (analytics outside video)
         self._extended_renderer = ExtendedFrameRenderer(config.visualization)
         self._recent_matches: list[dict] = []  # Track recent ID matches for bottom bar
@@ -108,17 +112,42 @@ class VideoReIDPipeline:
         for det, feat in zip(detections, features):
             det.features = feat
 
-        # Stage 2: Batch match to ensure unique IDs per frame
+        # Stage 2: IoU-based track continuation + ReID matching
         self._current_stage = 2
         features_list = [det.features for det in detections]
         bboxes = [det.bbox for det in detections]
+        current_frame = self.gallery._frame_idx
+
+        # First: try IoU-based continuation for recent tracks (within 5 frames)
+        iou_matched: dict[int, int] = {}  # det_idx -> track_id
+        used_tracks = set()
+        for det_idx, bbox in enumerate(bboxes):
+            best_iou, best_tid = 0.0, None
+            for tid, (prev_bbox, last_frame) in self._track_bboxes.items():
+                if tid in used_tracks:
+                    continue
+                if current_frame - last_frame > 5:  # Skip stale tracks
+                    continue
+                iou = self._compute_iou(bbox, prev_bbox)
+                if iou > best_iou and iou >= self._iou_threshold:
+                    best_iou, best_tid = iou, tid
+            if best_tid is not None:
+                iou_matched[det_idx] = best_tid
+                used_tracks.add(best_tid)
 
         # Get recent IDs BEFORE match_batch updates temporal history
         recent_ids = [self.gallery.get_recent_id(bbox) for bbox in bboxes]
 
+        # ReID matching for detections not matched by IoU
         results = self.gallery.match_batch(features_list, bboxes=bboxes)
         matched_ids = [r[0] for r in results]
         similarities = [r[1] for r in results]
+
+        # Override with IoU matches where applicable
+        for det_idx, tid in iou_matched.items():
+            if matched_ids[det_idx] is None:
+                matched_ids[det_idx] = tid
+                similarities[det_idx] = 0.9  # High confidence for IoU match
 
         # Compute quality scores for each detection
         gallery_cfg = self.config.gallery
@@ -188,7 +217,28 @@ class VideoReIDPipeline:
                 # Reset animation on re-match
                 self._match_animations[matched_id] = 0
 
+            # Update track bbox for IoU continuation
+            if det.track_id is not None:
+                self._track_bboxes[det.track_id] = (det.bbox, frame_idx)
+
         return detections
+
+    def _compute_iou(
+        self,
+        bbox1: tuple[float, ...],
+        bbox2: tuple[float, ...],
+    ) -> float:
+        """Compute IoU between two bboxes."""
+        x1 = max(bbox1[0], bbox2[0])
+        y1 = max(bbox1[1], bbox2[1])
+        x2 = min(bbox1[2], bbox2[2])
+        y2 = min(bbox1[3], bbox2[3])
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        if inter == 0:
+            return 0.0
+        area1 = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1])
+        area2 = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1])
+        return inter / (area1 + area2 - inter)
 
     def process_video(
         self,
