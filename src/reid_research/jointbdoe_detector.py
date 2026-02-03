@@ -35,6 +35,7 @@ class Detection:
     previous_id_timestamp: int | None = None  # Last seen frame of previous ID
     match_similarity: float = 0.0  # Similarity score of the ReID match
     is_recovery: bool = False  # True if ReID match occurs after spatial track loss
+    top_similar: list = None  # Top 3 similar IDs: [(id, similarity), ...]
 
 
 class JointBDOEDetector:

@@ -143,6 +143,10 @@ class VideoReIDPipeline:
             detections, matched_ids, recent_ids, similarities, quality_scores
         ):
             det.match_similarity = similarity
+            # Get top 3 similar IDs (excluding matched ID)
+            det.top_similar = self.gallery.get_top_similar(
+                det.features, exclude_id=matched_id, top_k=3
+            )
             frame_idx = self.gallery._frame_idx
             if matched_id is None:
                 det.track_id = self.gallery.add(
@@ -381,16 +385,16 @@ class VideoReIDPipeline:
                 vis, label, (cx - tw // 2, cy + th // 2 + 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2
             )
 
-            # Show similarity if recovery: "similar to ID:XX n%"
-            rematch_frames = self.fps * self.REMATCH_DISPLAY_SECONDS
-            if det.is_recovery and anim_frame < rematch_frames:
-                recovery_label = f"similar to ID:{track_id:02d} {det.match_similarity*100:.0f}%"
-                (rw, rh), _ = cv2.getTextSize(recovery_label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
-                # Draw below the main ID in the middle
-                cv2.rectangle(vis, (cx - rw // 2 - 4, cy + th // 2 + 5), (cx + rw // 2 + 4, cy + th // 2 + rh + 12), (0, 0, 0), -1)
-                cv2.putText(
-                    vis, recovery_label, (cx - rw // 2, cy + th // 2 + rh + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 100), 1
-                )
+            # Show top 3 similar IDs below bbox
+            if det.top_similar:
+                y_offset = y2 + 15
+                for sim_id, sim_score in det.top_similar[:3]:
+                    sim_label = f"~ID:{sim_id:02d}: {sim_score*100:.0f}%"
+                    (sw, sh), _ = cv2.getTextSize(sim_label, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+                    # Draw below bbox
+                    cv2.rectangle(vis, (x1, y_offset - sh - 2), (x1 + sw + 6, y_offset + 2), (40, 40, 40), -1)
+                    cv2.putText(vis, sim_label, (x1 + 3, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 255), 1)
+                    y_offset += sh + 6
 
             # Draw rematch info: [ID:10 (00:10) --> ID:01 (00:11)]
             # Show rematch info for REMATCH_DISPLAY_SECONDS

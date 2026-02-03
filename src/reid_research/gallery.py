@@ -569,6 +569,44 @@ class PersonGallery:
             min_entries_per_id=cfg.rank_min_entries_per_id,
         )
 
+    def get_top_similar(
+        self,
+        features: np.ndarray,
+        exclude_id: int | None = None,
+        top_k: int = 3,
+    ) -> list[tuple[int, float]]:
+        """Get top-k most similar gallery IDs for a query.
+
+        Args:
+            features: Query feature vector
+            exclude_id: ID to exclude (e.g., the matched ID)
+            top_k: Number of similar IDs to return
+
+        Returns:
+            List of (track_id, similarity) sorted by similarity descending
+        """
+        exclude_ids = {exclude_id} if exclude_id is not None else set()
+        rank_list = self.get_rank_list(features, k=20, exclude_ids=exclude_ids)
+
+        if not rank_list:
+            return []
+
+        # Convert distance to similarity (1 - dist/2 for L2-normalized)
+        # Group by ID and take min distance per ID
+        id_min_dist: dict[int, float] = {}
+        for track_id, dist, _ in rank_list:
+            if track_id not in id_min_dist or dist < id_min_dist[track_id]:
+                id_min_dist[track_id] = dist
+
+        # Convert to similarity and sort
+        similarities = [
+            (tid, max(0.0, 1.0 - dist / 2.0))
+            for tid, dist in id_min_dist.items()
+        ]
+        similarities.sort(key=lambda x: x[1], reverse=True)
+
+        return similarities[:top_k]
+
     def match(self, features: np.ndarray) -> int | None:
         """Find best matching ID in gallery.
 
