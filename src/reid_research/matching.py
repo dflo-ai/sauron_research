@@ -725,6 +725,13 @@ def validate_motion_consistency(
     Returns:
         True if motion is consistent (valid match)
     """
+    # For stationary/slow-moving tracks, skip validation
+    # Motion validation is designed for moving objects - stationary people
+    # have natural detection jitter that shouldn't cause rejection
+    track_speed = (track_velocity[0] ** 2 + track_velocity[1] ** 2) ** 0.5
+    if track_speed < 5.0:  # Near-stationary track
+        return True  # Always valid for stationary people
+
     # Check position proximity
     dx = detection_center[0] - predicted_center[0]
     dy = detection_center[1] - predicted_center[1]
@@ -734,9 +741,7 @@ def validate_motion_consistency(
         return False
 
     # Check velocity direction consistency
-    # Skip if either velocity is near zero
     det_speed = (detection_velocity[0] ** 2 + detection_velocity[1] ** 2) ** 0.5
-    track_speed = (track_velocity[0] ** 2 + track_velocity[1] ** 2) ** 0.5
 
     if det_speed < 1.0 or track_speed < 1.0:
         # Can't reliably check direction, pass based on position only
