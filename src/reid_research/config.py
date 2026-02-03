@@ -93,6 +93,9 @@ class VisualizationConfig(BaseModel):
     split_view_enabled: bool = False
     split_view_stages: list[str] = ["detection", "reid"]
 
+    # Extended frame layout (analytics outside video frame)
+    extended_frame_enabled: bool = True  # Default: use extended layout
+
 
 class OutputConfig(BaseModel):
     """Output configuration."""

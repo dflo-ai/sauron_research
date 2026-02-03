@@ -7,7 +7,7 @@ model:
   device: "cuda"                   # cuda (validated)
   # FastReID configuration (SBS R50-ibn: 89.3% mAP, 2048-dim features)
   use_fastreid: false              # Toggle FastReID vs OSNet
-  fastreid_config: "fast-reid/configs/Market1501/bagtricks_vit.yml"
+  fastreid_config: "fast-reid/configs/Market1501/market_sbs_R50-ibn.yml"
   fastreid_weights: "weights/market_sbs_R50-ibn.pth"
   fastreid_input_size: [384, 128]  # H, W
 
@@ -15,7 +15,7 @@ inference:
   image_size: [512, 256]           # ReID crop size (H, W)
   batch_size: 64                   # Feature extraction batch
   confidence_threshold: 0.8        # YOLO detection confidence
-  similarity_threshold: 0.65        # ReID cosine similarity (validated: stricter)
+  similarity_threshold: 0.8        # ReID cosine similarity (stricter to prevent ID theft)
 
 gallery:
   max_features_per_id: 200         # Rolling window size
@@ -45,7 +45,7 @@ gallery:
   velocity_history_frames: 5       # Frames to average velocity
   velocity_max_speed: 100.0        # Max pixels/frame (clamp outliers)
   prediction_radius: 75.0          # Match radius around prediction
-  prediction_boost: 0.15           # Similarity boost for position match
+  prediction_boost: 0.01           # Reduced to prevent ID theft when people cross paths
 
   # Legacy temporal consistency (deprecated - use velocity_prediction)
   use_temporal_consistency: false  # Position-hash based (legacy)
@@ -53,7 +53,7 @@ gallery:
   temporal_boost: 0.2              # Boost for consistent matches
 
   # Adaptive similarity threshold (-10-20% false positives)
-  use_adaptive_threshold: false    # Dynamic threshold adjustment
+  use_adaptive_threshold: true    # Dynamic threshold adjustment
   adaptive_min_threshold: 0.50     # Floor threshold
   adaptive_max_threshold: 0.80     # Ceiling threshold
   adaptive_window_size: 100        # Matches to track
@@ -79,5 +79,8 @@ visualization:
   bbox_thickness_unmatched: 2      # Line thickness for new detections
 
   # Split view (educational mode)
-  split_view_enabled: false        # Show pipeline stages side-by-side
+  split_view_enabled: false       # Disabled - show ReID view only
   split_view_stages: ["detection", "reid"]
+
+  # Extended frame layout (analytics outside video frame)
+  extended_frame_enabled: true    # Stats/gallery in padding, ID matching at bottom

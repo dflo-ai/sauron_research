@@ -3,6 +3,7 @@ from .colors import get_id_color, get_bbox_style, OKABE_ITO_PALETTE
 from .gallery_panel import GalleryPanelRenderer, GalleryPanelEntry
 from .hud_renderer import HUDRenderer, EventTicker
 from .split_view_renderer import SplitViewRenderer
+from .extended_frame_renderer import ExtendedFrameRenderer
 
 __all__ = [
     "get_id_color",
@@ -13,4 +14,5 @@ __all__ = [
     "HUDRenderer",
     "EventTicker",
     "SplitViewRenderer",
+    "ExtendedFrameRenderer",
 ]

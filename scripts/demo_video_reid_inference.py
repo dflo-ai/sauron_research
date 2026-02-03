@@ -73,6 +73,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable split-view layout (side-by-side pipeline stages)",
     )
+    parser.add_argument(
+        "--no-extended",
+        action="store_true",
+        help="Disable extended frame layout (analytics overlay on video)",
+    )
     return parser.parse_args()
 
 
@@ -104,6 +109,8 @@ def main() -> int:
         config.visualization.show_pipeline_hud = False
     if args.split_view:
         config.visualization.split_view_enabled = True
+    if args.no_extended:
+        config.visualization.extended_frame_enabled = False
 
     # Setup paths (validated: use data/videos/ by default)
     if args.video:

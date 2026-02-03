@@ -259,12 +259,21 @@ class PersonGallery:
         predictions = self._predict_track_positions()
         adjusted = sim_matrix.copy()
 
+        # Minimum similarity required before applying position boost
+        # Prevents ID theft when different-looking people cross paths
+        min_sim_for_boost = 0.4
+
         for q_idx, bbox in enumerate(bboxes):
             det_cx = (bbox[0] + bbox[2]) / 2
             det_cy = (bbox[1] + bbox[3]) / 2
 
             for g_idx, gal_id in enumerate(gallery_ids):
                 if gal_id not in predictions:
+                    continue
+
+                # Only apply position boost if base similarity is reasonable
+                base_sim = sim_matrix[q_idx, g_idx]
+                if base_sim < min_sim_for_boost:
                     continue
 
                 pred_pos = predictions[gal_id]

@@ -17,6 +17,7 @@ from .visualization import (
     GalleryPanelEntry,
     HUDRenderer,
     SplitViewRenderer,
+    ExtendedFrameRenderer,
 )
 
 
@@ -80,6 +81,10 @@ class VideoReIDPipeline:
 
         # Split view renderer
         self._split_view_renderer = SplitViewRenderer(config.visualization)
+
+        # Extended frame renderer (analytics outside video)
+        self._extended_renderer = ExtendedFrameRenderer(config.visualization)
+        self._recent_matches: list[dict] = []  # Track recent ID matches for bottom bar
 
     def process_frame(self, frame: np.ndarray) -> list[Detection]:
         """Process single frame: detect -> extract -> match.
@@ -150,11 +155,19 @@ class VideoReIDPipeline:
                 self._match_animations[det.track_id] = 0
                 # Add event to ticker
                 self._hud_renderer.add_event(f"ID#{det.track_id} new", frame_idx, "new")
+                # Track for extended frame bottom bar
+                self._recent_matches.append({"id": det.track_id, "similarity": 0.0, "is_new": True})
+                if len(self._recent_matches) > 20:
+                    self._recent_matches.pop(0)
             else:
                 det.track_id = matched_id
                 det.is_matched = True  # ReID match found
                 # Add event to ticker
                 self._hud_renderer.add_event(f"ID#{det.track_id} matched", frame_idx, "match")
+                # Track for extended frame bottom bar (estimate similarity)
+                self._recent_matches.append({"id": det.track_id, "similarity": 0.85, "is_new": False})
+                if len(self._recent_matches) > 20:
+                    self._recent_matches.pop(0)
 
                 # Detect if this is a rematch from a DIFFERENT previous ID
                 if recent_id is not None and recent_id != matched_id:
@@ -197,13 +210,18 @@ class VideoReIDPipeline:
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        # Output writer
+        # Output writer - use extended dimensions if enabled
         writer = None
         if output_path and self.config.output.save_video:
             output_path = Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(str(output_path), fourcc, self.fps, (width, height))
+
+            if self.config.visualization.extended_frame_enabled:
+                ext_w, ext_h = self._extended_renderer.get_extended_dimensions(width, height)
+                writer = cv2.VideoWriter(str(output_path), fourcc, self.fps, (ext_w, ext_h))
+            else:
+                writer = cv2.VideoWriter(str(output_path), fourcc, self.fps, (width, height))
 
         # Processing loop with progress bar
         stats = {"frames": 0, "detections": 0, "unique_ids": set(), "reid_matches": 0}
@@ -235,9 +253,26 @@ class VideoReIDPipeline:
                     vis_frame = self._split_view_renderer.render(
                         stage_frames, (width, height)
                     )
+                elif self.config.visualization.extended_frame_enabled:
+                    # Extended layout: analytics outside video frame
+                    vis_frame = self._visualize(frame, detections)
+                    gallery_entries = self._get_gallery_entries(detections)
+                    vis_frame = self._extended_renderer.create_extended_frame(
+                        video_frame=vis_frame,
+                        gallery_entries=gallery_entries,
+                        stats={
+                            "frame_idx": stats["frames"],
+                            "total_frames": total_frames,
+                            "detections": len(detections),
+                            "reid_matches": frame_matches,
+                            "unique_ids": len(stats["unique_ids"]),
+                        },
+                        recent_matches=self._recent_matches[-10:],
+                        fps=self.fps,
+                    )
                 else:
                     vis_frame = self._visualize(frame, detections)
-                    # Add HUD overlay on video
+                    # Add HUD overlay on video (legacy mode)
                     if self.config.visualization.show_pipeline_hud:
                         vis_frame = self._draw_hud(
                             vis_frame, stats["frames"], total_frames,
@@ -374,11 +409,47 @@ class VideoReIDPipeline:
             if self._match_animations[tid] > self.fps * self.REMATCH_DISPLAY_SECONDS:
                 del self._match_animations[tid]
 
-        # Draw gallery panel if enabled
-        if self.config.visualization.show_gallery_panel:
+        # Draw gallery panel if enabled (only for non-extended mode)
+        if self.config.visualization.show_gallery_panel and not self.config.visualization.extended_frame_enabled:
             vis = self._draw_gallery_panel(vis, active_ids)
 
         return vis
+
+    def _get_gallery_entries(self, detections: list[Detection]) -> list[GalleryPanelEntry]:
+        """Get gallery entries for extended frame renderer.
+
+        Args:
+            detections: Current frame detections
+
+        Returns:
+            List of GalleryPanelEntry sorted by last_seen
+        """
+        active_ids = {det.track_id for det in detections if det.track_id is not None}
+        entries = []
+
+        for track_id in self.gallery.get_all_ids():
+            if track_id not in self._thumbnail_cache:
+                continue
+
+            thumb, first_seen, det_count = self._thumbnail_cache[track_id]
+            gallery_entry = self.gallery.get_entry(track_id)
+            if gallery_entry is None:
+                continue
+
+            entries.append(
+                GalleryPanelEntry(
+                    track_id=track_id,
+                    thumbnail=thumb,
+                    first_seen=first_seen,
+                    last_seen=gallery_entry.last_seen,
+                    detection_count=det_count,
+                    is_active=track_id in active_ids,
+                )
+            )
+
+        # Sort by last_seen descending
+        entries.sort(key=lambda e: e.last_seen, reverse=True)
+        return entries
 
     def _update_thumbnail_cache(self, det: Detection) -> None:
         """Update thumbnail cache for a detection.
