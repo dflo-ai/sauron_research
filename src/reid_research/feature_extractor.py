@@ -74,7 +74,12 @@ class ReIDFeatureExtractor:
 
             all_features.append(features)
 
-        return np.vstack(all_features)
+        features = np.vstack(all_features)
+
+        # L2 normalize features for consistent distance computation
+        norms = np.linalg.norm(features, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-8)  # Avoid division by zero
+        return features / norms
 
     def extract_single(self, crop: np.ndarray) -> np.ndarray:
         """Extract features from single crop.
