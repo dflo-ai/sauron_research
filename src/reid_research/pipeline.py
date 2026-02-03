@@ -6,17 +6,15 @@ import numpy as np
 from tqdm import tqdm
 
 from .config import ReIDConfig
-from .detector import Detection
 from .feature_extractor import ReIDFeatureExtractor
 from .gallery import PersonGallery
-from .jointbdoe_detector import JointBDOEDetector
+from .jointbdoe_detector import JointBDOEDetector, Detection
 from .matching import compute_quality_score
 from .visualization import (
     get_id_color,
     GalleryPanelRenderer,
     GalleryPanelEntry,
     HUDRenderer,
-    SplitViewRenderer,
     ExtendedFrameRenderer,
 )
 
@@ -48,15 +46,8 @@ class VideoReIDPipeline:
         # Use JointBDOE detector (person detection + ReID features in one model)
         self.detector = detector or JointBDOEDetector(config)
 
-        # Select extractor based on config: FastReID or torchreid OSNet
-        if extractor is not None:
-            self.extractor = extractor
-        elif config.model.use_fastreid:
-            # Lazy import to avoid fastreid dependency when not used
-            from .fastreid_extractor import FastReIDExtractor
-            self.extractor = FastReIDExtractor(config)
-        else:
-            self.extractor = ReIDFeatureExtractor(config)
+        # OSNet feature extractor (via torchreid)
+        self.extractor = extractor or ReIDFeatureExtractor(config)
         self.gallery = gallery or PersonGallery(config)
         self.fps = 30  # Default FPS
 
@@ -73,9 +64,6 @@ class VideoReIDPipeline:
         # HUD renderer for pipeline stages and stats
         self._hud_renderer = HUDRenderer(config.visualization)
         self._current_stage = 0  # Pipeline stage: 0=Detect, 1=Extract, 2=Match, 3=Track
-
-        # Split view renderer
-        self._split_view_renderer = SplitViewRenderer(config.visualization)
 
         # IoU-based track continuation: track_id -> (bbox, last_frame)
         self._track_bboxes: dict[int, tuple[tuple[float, ...], int]] = {}
@@ -419,13 +407,7 @@ class VideoReIDPipeline:
 
             # Visualize and write
             if writer and self.config.output.visualization:
-                # Check if split view is enabled
-                if self.config.visualization.split_view_enabled:
-                    stage_frames = self._generate_stage_frames(frame, detections)
-                    vis_frame = self._split_view_renderer.render(
-                        stage_frames, (width, height)
-                    )
-                elif self.config.visualization.extended_frame_enabled:
+                if self.config.visualization.extended_frame_enabled:
                     # Extended layout: analytics outside video frame
                     vis_frame = self._visualize(frame, detections)
                     gallery_entries = self._get_gallery_entries(detections)
@@ -784,51 +766,3 @@ class VideoReIDPipeline:
 
         return vis
 
-    def _generate_stage_frames(
-        self, frame: np.ndarray, detections: list[Detection]
-    ) -> dict[str, np.ndarray]:
-        """Generate visualization frames for each pipeline stage.
-
-        Args:
-            frame: Original BGR frame
-            detections: List of detections with track_ids
-
-        Returns:
-            Dict mapping stage name to frame
-        """
-        stages = {}
-        stages["original"] = frame.copy()
-        stages["detection"] = self._draw_detections_only(frame, detections)
-        stages["reid"] = self._visualize(frame, detections)
-        return stages
-
-    def _draw_detections_only(
-        self, frame: np.ndarray, detections: list[Detection]
-    ) -> np.ndarray:
-        """Draw only bounding boxes without IDs (detection stage view).
-
-        Args:
-            frame: BGR numpy array
-            detections: List of detections
-
-        Returns:
-            Annotated frame with boxes only
-        """
-        vis = frame.copy()
-
-        for det in detections:
-            x1, y1, x2, y2 = map(int, det.bbox)
-
-            # Simple white boxes for detection stage
-            cv2.rectangle(vis, (x1, y1), (x2, y2), (255, 255, 255), 2)
-
-            # Confidence label
-            conf_label = f"{det.confidence:.2f}"
-            (tw, th), _ = cv2.getTextSize(conf_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(vis, (x1, y1 - th - 6), (x1 + tw + 4, y1), (255, 255, 255), -1)
-            cv2.putText(
-                vis, conf_label, (x1 + 2, y1 - 3),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1
-            )
-
-        return vis

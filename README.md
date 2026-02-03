@@ -64,7 +64,7 @@ Video Frame
     ↓
 JointBDOE Detector (person + orientation)
     ↓
-Feature Extraction (OSNet_x1_0 or FastReID R50-ibn)
+Feature Extraction (OSNet x1.0, 512-dim)
     ↓
 Hungarian Assignment + Rank-List Voting
     ↓
@@ -77,7 +77,7 @@ Gallery Update & Visualization
 
 **Key Components:**
 - `JointBDOEDetector`: Primary detector for person + body orientation
-- `ReIDFeatureExtractor`: OSNet backbone (default) or FastReID alternative
+- `ReIDFeatureExtractor`: OSNet backbone (512-dim L2-normalized features)
 - `PersonGallery`: Dict-based track store with EMA feature fusion
 - `VideoReIDPipeline`: Orchestrates detection → extraction → matching → visualization
 
@@ -115,8 +115,13 @@ Demo video analysis: **1990 unique IDs → 12 unique IDs** (±16 actual people)
 │   ├── matching.py              # Feature matching + re-ranking (CVPR2017)
 │   ├── config.py                # Pydantic config models + YAML loader
 │   ├── jointbdoe_detector.py    # Primary person detection
-│   ├── feature_extractor.py     # OSNet feature extraction
-│   ├── fastreid_extractor.py    # FastReID alternative
+│   ├── feature_extractor.py     # OSNet feature extraction wrapper
+│   ├── models/                  # Neural network architectures
+│   │   └── osnet.py             # OSNet backbone (ported from TorchReID)
+│   ├── extractors/              # Feature extraction backends
+│   │   └── torchreid-feature-extractor.py
+│   ├── detectors/               # Detection backends
+│   │   └── jointbdoe/           # JointBDOE utilities (ported)
 │   └── visualization/           # Rendering (gallery, HUD, layouts)
 ├── configs/default.yaml         # Main configuration file
 ├── scripts/demo_video_reid_inference.py  # Demo entry point
@@ -169,9 +174,10 @@ pytest tests/ --cov=src/reid_research --cov-report=html
 ## References
 
 - **Paper:** Zhong et al., "Re-ranking Person Re-identification with k-reciprocal Encoding", CVPR 2017
-- **torchreid:** https://github.com/KaiyangZhou/deep-person-reid
-- **FastReID:** https://github.com/JDAI-CV/fast-reid
+- **OSNet:** Zhou et al., "Omni-Scale Feature Learning for Person Re-Identification", ICCV 2019
 - **JointBDOE:** Bounding box and orientation detection
+
+**Note:** OSNet and JointBDOE utilities have been ported into this package for self-contained operation.
 
 ## Contact & Support
 

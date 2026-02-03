@@ -57,10 +57,6 @@ class PersonGallery:
         self._next_id: int = 0
         self._frame_idx: int = 0
 
-        # Legacy temporal history (position-hash based)
-        self._temporal_history: dict[int, deque] = {}
-        self._temporal_window = config.gallery.temporal_window
-
         # Velocity-based motion tracking
         self._track_motion: dict[int, TrackMotion] = {}
 
@@ -211,53 +207,6 @@ class PersonGallery:
         cy = (bbox[1] + bbox[3]) / 2
         return hash((int(cx // 50), int(cy // 50)))
 
-    def _apply_temporal_consistency(
-        self,
-        sim_matrix: np.ndarray,
-        bbox_hashes: list[int],
-        gallery_ids: list[int],
-    ) -> np.ndarray:
-        """Apply temporal consistency boost to similarity matrix.
-
-        Args:
-            sim_matrix: (Q, G) similarity scores
-            bbox_hashes: Hash for each query detection position
-            gallery_ids: List of gallery track IDs
-
-        Returns:
-            Adjusted similarity matrix
-        """
-        boost = self.config.gallery.temporal_boost
-        adjusted = sim_matrix.copy()
-
-        for q_idx, bbox_hash in enumerate(bbox_hashes):
-            history = self._temporal_history.get(bbox_hash)
-            if not history:
-                continue
-
-            # Boost IDs seen recently at this position
-            for g_idx, gal_id in enumerate(gallery_ids):
-                count = sum(1 for h_id in history if h_id == gal_id)
-                if count > 0:
-                    adjusted[q_idx, g_idx] += boost * (count / len(history))
-
-        return adjusted
-
-    def _update_temporal_history(
-        self, bbox_hashes: list[int], assigned_ids: list[int | None]
-    ) -> None:
-        """Update temporal history with this frame's assignments."""
-        window = self._temporal_window
-
-        for bbox_hash, track_id in zip(bbox_hashes, assigned_ids):
-            if track_id is None:
-                continue
-
-            if bbox_hash not in self._temporal_history:
-                self._temporal_history[bbox_hash] = deque(maxlen=window)
-
-            self._temporal_history[bbox_hash].append(track_id)
-
     def _apply_velocity_consistency(
         self,
         sim_matrix: np.ndarray,
@@ -324,7 +273,7 @@ class PersonGallery:
             Dict mapping track_id to predicted (cx, cy)
         """
         predictions = {}
-        max_age = self.config.gallery.temporal_window
+        max_age = self.config.gallery.velocity_history_frames
 
         for track_id, motion in self._track_motion.items():
             if self._frame_idx - motion.last_frame > max_age:
@@ -745,19 +694,30 @@ class PersonGallery:
         return self._gallery.get(track_id)
 
     def get_recent_id(self, bbox: tuple[float, ...]) -> int | None:
-        """Get the most recent track ID seen at this position."""
-        bbox_hash = self._bbox_hash(bbox)
-        history = self._temporal_history.get(bbox_hash)
-        if history and len(history) > 0:
-            return history[-1]
+        """Get the most recent track ID seen near this position.
+
+        Uses velocity-based motion tracking to find nearby active tracks.
+        """
+        cx = (bbox[0] + bbox[2]) / 2
+        cy = (bbox[1] + bbox[3]) / 2
+        radius = self.config.gallery.prediction_radius
+
+        # Check motion history for recently seen tracks
+        for track_id, motion in self._track_motion.items():
+            if self._frame_idx - motion.last_frame > 5:  # Stale track
+                continue
+            if motion.positions:
+                last_cx, last_cy = motion.positions[-1]
+                dist = ((cx - last_cx) ** 2 + (cy - last_cy) ** 2) ** 0.5
+                if dist < radius:
+                    return track_id
         return None
 
     def clear(self) -> None:
-        """Clear all gallery entries and temporal history."""
+        """Clear all gallery entries and motion history."""
         self._gallery.clear()
         self._next_id = 0
         self._frame_idx = 0
-        self._temporal_history.clear()
         self._track_motion.clear()
         self.reset_threshold_stats()
 

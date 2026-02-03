@@ -13,11 +13,6 @@ class ModelConfig(BaseModel):
     device: str = "cuda"
     # JointBDOE detector weights
     yolo_weights: str = "data/weights/jointbdoe_m.pt"
-    # FastReID configuration
-    use_fastreid: bool = False
-    fastreid_config: str = "fast-reid/configs/Market1501/sbs_R50-ibn.yml"
-    fastreid_weights: str = "weights/market_sbs_R50-ibn.pth"
-    fastreid_input_size: tuple[int, int] = (384, 128)  # H, W
 
 
 class InferenceConfig(BaseModel):
@@ -41,12 +36,8 @@ class GalleryConfig(BaseModel):
     rank_min_entries_per_id: int = 3  # Min entries before voting kicks in
     rank_fallback_threshold: float = 1.2  # Distance threshold for early matching
 
-    # k-reciprocal re-ranking (improves accuracy +3-5% mAP)
-    use_reranking: bool = False
-    rerank_k: int = 20  # Number of neighbors for reciprocal check
-    rerank_boost: float = 0.1  # Similarity boost for reciprocal matches
-    # Full k-reciprocal with Jaccard distance (CVPR 2017)
-    use_full_reranking: bool = False  # Full algorithm (slower, +5-15% accuracy)
+    # Full k-reciprocal re-ranking with Jaccard distance (CVPR 2017)
+    use_full_reranking: bool = False  # +5-15% mAP, slower
     rerank_k1: int = 20  # Initial k for R(p,k1)
     rerank_k2: int = 6  # Expansion k for R*(p,k1)
     rerank_lambda: float = 0.3  # Weight for original distance
@@ -65,11 +56,6 @@ class GalleryConfig(BaseModel):
     velocity_max_speed: float = 100.0  # Max pixels/frame (clamp outliers)
     prediction_radius: float = 75.0  # Match radius around prediction
     prediction_boost: float = 0.15  # Similarity boost for position match
-
-    # Legacy temporal consistency (position-hash based)
-    use_temporal_consistency: bool = False  # Deprecated: use velocity_prediction
-    temporal_window: int = 5  # Frames to track history
-    temporal_boost: float = 0.1  # Similarity boost for consistent matches
 
     # Adaptive similarity threshold
     use_adaptive_threshold: bool = False
@@ -118,10 +104,6 @@ class VisualizationConfig(BaseModel):
     panel_bg_opacity: float = 0.75
     bbox_thickness_matched: int = 3
     bbox_thickness_unmatched: int = 2
-
-    # Split view
-    split_view_enabled: bool = False
-    split_view_stages: list[str] = ["detection", "reid"]
 
     # Extended frame layout (analytics outside video frame)
     extended_frame_enabled: bool = True  # Default: use extended layout

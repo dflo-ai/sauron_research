@@ -1,22 +1,18 @@
 """JointBDOE person detection wrapper - optimized for human detection."""
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-import cv2
 import numpy as np
 import torch
 
-# Add JointBDOE to path
-JOINTBDOE_PATH = Path(__file__).parent.parent.parent / "jointbdoe"
-if str(JOINTBDOE_PATH) not in sys.path:
-    sys.path.insert(0, str(JOINTBDOE_PATH))
-
-from models.experimental import attempt_load
-from utils.augmentations import letterbox
-from utils.general import check_img_size, non_max_suppression, scale_coords
-
 from .config import ReIDConfig
+from .detectors.jointbdoe import (
+    attempt_load,
+    letterbox,
+    check_img_size,
+    non_max_suppression,
+    scale_coords,
+)
 from .utils import extract_crop
 
 

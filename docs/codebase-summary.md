@@ -9,21 +9,30 @@
 
 ```
 src/reid_research/
-├── pipeline.py (830 LOC)           # Main orchestration
-├── gallery.py (904 LOC)            # Track storage + matching
-├── matching.py (1009 LOC)          # Feature matching + re-ranking
-├── config.py (159 LOC)             # Configuration models
-├── jointbdoe_detector.py (137)     # Primary detector
-├── detector.py (89)                # Legacy YOLO detector
-├── feature_extractor.py (99)       # OSNet extractor
-├── fastreid_extractor.py (129)     # FastReID extractor
-├── utils.py (59)                   # Utilities
+├── pipeline.py                     # Main orchestration
+├── gallery.py                      # Track storage + matching
+├── matching.py                     # Feature matching + re-ranking
+├── config.py                       # Configuration models
+├── jointbdoe_detector.py           # Primary detector wrapper
+├── feature_extractor.py            # OSNet extractor wrapper
+├── utils.py                        # Utilities
+├── models/                         # Neural network architectures (ported)
+│   ├── __init__.py
+│   └── osnet.py                    # OSNet backbone (~400 LOC)
+├── extractors/                     # Feature extraction backends (ported)
+│   ├── __init__.py
+│   └── torchreid-feature-extractor.py
+├── detectors/                      # Detection backends (ported)
+│   ├── __init__.py
+│   └── jointbdoe/
+│       ├── model-loader-attempt-load.py
+│       ├── preprocessing-letterbox-resize.py
+│       └── postprocessing-nms-scale-coords.py
 └── visualization/
-    ├── colors.py (73)              # Okabe-Ito palette
-    ├── gallery_panel.py (237)      # Thumbnail renderer
-    ├── hud_renderer.py (296)       # Stats/event HUD
-    ├── extended_frame_renderer.py (227) # Analytics layout
-    └── split_view_renderer.py (197)    # Side-by-side view
+    ├── colors.py                   # Okabe-Ito palette
+    ├── gallery_panel.py            # Thumbnail renderer
+    ├── hud_renderer.py             # Stats/event HUD
+    └── extended_frame_renderer.py  # Analytics layout
 ```
 
 ## 1. Core Pipeline: `pipeline.py` (830 LOC)
@@ -98,9 +107,8 @@ def process_frame(self, frame):
 ### Configuration Dependencies
 
 ```python
-config.model.use_fastreid      # Choose FastReID or OSNet
 config.gallery.min_frames_for_id   # Frames before permanent ID
-config.visualization.*         # Rendering options
+config.visualization.*             # Rendering options
 ```
 
 ## 2. Gallery & Assignment: `gallery.py` (904 LOC)
@@ -321,51 +329,37 @@ class JointBDOEDetector:
 - `conf`: confidence score
 - `orientation`: body orientation angle (optional)
 
-### YOLODetector: `detector.py` (89 LOC)
-
-```python
-class YOLODetector:
-    """Legacy YOLO11 detector (fallback)"""
-
-    def detect(self, frame: np.ndarray) -> List[Detection]:
-        """Returns detections without orientation"""
-```
-
 ## 6. Feature Extractors
 
-### OSNet (Default): `feature_extractor.py` (99 LOC)
+### OSNet: `feature_extractor.py` + `models/osnet.py`
 
 ```python
 class ReIDFeatureExtractor:
     """Extracts 512-dim features using OSNet backbone
 
-    Model: osnet_x1_0 (pretrained on Market1501, MSMT17)
+    Model: osnet_x1_0 (pretrained on ImageNet, fine-tuned on Market1501)
     Output: 512-dim L2-normalized feature vectors
     """
 
-    def extract(self, frame, detections) -> np.ndarray:
+    def extract(self, crops: list[np.ndarray]) -> np.ndarray:
         """Returns (N, 512) feature matrix"""
 ```
 
-### FastReID: `fastreid_extractor.py` (129 LOC)
+### Models Module: `models/`
 
 ```python
-class FastReIDExtractor:
-    """Alternative extractor using FastReID R50-ibn backbone
+from src.reid_research.models import osnet_x1_0, osnet_ibn_x1_0, build_model
 
-    Model: R50-ibn (trained on Market1501, MSMT17, DukeMTMC)
-    Output: 2048-dim L2-normalized features
-    """
+# Build model directly
+model = osnet_x1_0(num_classes=1, pretrained=True)
 
-    def extract(self, frame, detections) -> np.ndarray:
-        """Returns (N, 2048) feature matrix"""
+# Or via factory
+model = build_model("osnet_x1_0", pretrained=True)
 ```
 
-**Selection:**
-```yaml
-model:
-  use_fastreid: false  # true → FastReID, false → OSNet
-```
+**Available models:**
+- `osnet_x1_0`: Standard OSNet (512-dim)
+- `osnet_ibn_x1_0`: OSNet with Instance Normalization
 
 ## 7. Visualization Renderers
 
@@ -405,17 +399,7 @@ class HUDRenderer:
         # Renders text overlay with performance metrics
 ```
 
-### SplitViewRenderer: `split_view_renderer.py` (197 LOC)
-
-```python
-class SplitViewRenderer:
-    """Educational mode: side-by-side detection vs ReID visualization"""
-
-    def render_split(self, detection_frame, reid_frame):
-        # Combines two frames side-by-side with labels
-```
-
-### Color Palette: `colors.py` (73 LOC)
+### Color Palette: `colors.py`
 
 ```python
 # Okabe-Ito colorblind-safe palette (8 colors)
@@ -510,15 +494,20 @@ class GalleryEntry:
 ```
 VideoReIDPipeline
 ├── JointBDOEDetector
-│   └── Pre-trained JointBDOE model (weights)
-├── ReIDFeatureExtractor (or FastReIDExtractor)
-│   └── OSNet/R50-ibn backbone (torchreid/fastreid)
+│   └── detectors/jointbdoe/ (ported utilities)
+│   └── Pre-trained JointBDOE weights (data/weights/)
+├── ReIDFeatureExtractor
+│   └── models/osnet.py (ported from TorchReID)
+│   └── extractors/torchreid-feature-extractor.py
 ├── PersonGallery
 │   ├── matching module (all algorithms)
 │   └── lap (Hungarian algorithm)
 └── Visualization renderers
     └── colors.py (palette)
 ```
+
+**Note:** All external dependencies (TorchReID, JointBDOE) have been ported into
+the package for self-contained operation. Only model weights need to be downloaded.
 
 ## 13. Configuration Parameter Reference
 

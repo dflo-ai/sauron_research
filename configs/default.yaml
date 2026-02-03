@@ -3,13 +3,7 @@ model:
   reid_variant: "osnet_x1_0"       # osnet_x1_0 (validated: best accuracy)
   reid_weights: null               # null = auto-download pretrained
   yolo_weights: "data/weights/jointbdoe_m.pt"  # JointBDOE-M (same as sauron-services)
-  detector_type: "jointbdoe"       # "yolo" or "jointbdoe"
   device: "cuda"                   # cuda (validated)
-  # FastReID configuration (SBS R50-ibn: 89.3% mAP, 2048-dim features)
-  use_fastreid: false              # Toggle FastReID vs OSNet
-  fastreid_config: "fast-reid/configs/Market1501/market_sbs_R50-ibn.yml"
-  fastreid_weights: "weights/market_sbs_R50-ibn.pth"
-  fastreid_input_size: [384, 128]  # H, W
 
 inference:
   image_size: [512, 256]           # ReID crop size (H, W)
@@ -26,11 +20,6 @@ gallery:
   rank_distance_threshold: 1.0     # Fixed threshold for voting
   rank_min_entries_per_id: 2       # Min features before voting kicks in
   rank_fallback_threshold: 2.0     # Distance threshold for matching (max for L2-normalized)
-
-  # Simplified k-reciprocal re-ranking (+3-5% mAP)
-  use_reranking: false             # Simplified boost (superseded by full reranking)
-  rerank_k: 10                     # Neighbors for reciprocal check
-  rerank_boost: 0.2                # Similarity boost for matches
 
   # Full k-reciprocal with Jaccard distance (CVPR 2017, +5-15% accuracy)
   use_full_reranking: true         # Full algorithm (recommended)
@@ -57,11 +46,6 @@ gallery:
   min_frames_for_id: 5             # Min consecutive frames before permanent ID
   tentative_max_age: 10            # Max frames to keep unconfirmed tentative track
 
-  # Legacy temporal consistency (deprecated - use velocity_prediction)
-  use_temporal_consistency: false  # Position-hash based (legacy)
-  temporal_window: 5               # Frames to track history
-  temporal_boost: 0.2              # Boost for consistent matches
-
   # Adaptive similarity threshold (-10-20% false positives)
   use_adaptive_threshold: true    # Dynamic threshold adjustment
   adaptive_min_threshold: 0.50     # Floor threshold
@@ -87,10 +71,6 @@ visualization:
   panel_bg_opacity: 0.75           # Background opacity for overlays
   bbox_thickness_matched: 3        # Line thickness for ReID matches
   bbox_thickness_unmatched: 2      # Line thickness for new detections
-
-  # Split view (educational mode)
-  split_view_enabled: false       # Disabled - show ReID view only
-  split_view_stages: ["detection", "reid"]
 
   # Extended frame layout (analytics outside video frame)
   extended_frame_enabled: true    # Stats/gallery in padding, ID matching at bottom

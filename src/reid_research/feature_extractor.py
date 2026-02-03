@@ -1,18 +1,9 @@
 """TorchReID FeatureExtractor wrapper with config-driven interface."""
-import sys
-from pathlib import Path
-
 import numpy as np
 import torch
 
-# Add torchreid to path
-TORCHREID_PATH = Path(__file__).parent.parent.parent / "deep-person-reid"
-if str(TORCHREID_PATH) not in sys.path:
-    sys.path.insert(0, str(TORCHREID_PATH))
-
-from torchreid.utils import FeatureExtractor
-
 from .config import ReIDConfig
+from .extractors import FeatureExtractor
 
 
 class ReIDFeatureExtractor:

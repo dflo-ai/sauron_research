@@ -3,13 +3,12 @@ import numpy as np
 import pytest
 
 from src.reid_research.config import ReIDConfig, VisualizationConfig, load_config
-from src.reid_research.detector import Detection
+from src.reid_research.jointbdoe_detector import Detection
 from src.reid_research.pipeline import VideoReIDPipeline
 from src.reid_research.visualization import (
     GalleryPanelEntry,
     GalleryPanelRenderer,
     HUDRenderer,
-    SplitViewRenderer,
     get_id_color,
 )
 
@@ -119,38 +118,6 @@ class TestHUDRenderer:
         assert result.shape == frame.shape
 
 
-class TestSplitViewRenderer:
-    """Tests for split-view rendering."""
-
-    @pytest.fixture
-    def config(self):
-        config = VisualizationConfig()
-        config.split_view_enabled = True
-        return config
-
-    @pytest.fixture
-    def renderer(self, config):
-        return SplitViewRenderer(config)
-
-    def test_2way_layout(self, renderer):
-        """Renders 2-way split view."""
-        renderer.stages = ["detection", "reid"]
-        frames = {
-            "detection": np.zeros((480, 640, 3), dtype=np.uint8),
-            "reid": np.ones((480, 640, 3), dtype=np.uint8) * 128,
-        }
-        result = renderer.render(frames, (1280, 720))
-        assert result.shape == (720, 1280, 3)
-
-    def test_4way_layout(self, renderer):
-        """Renders 4-way split view."""
-        renderer.stages = ["original", "detection", "tracking", "reid"]
-        frame = np.zeros((480, 640, 3), dtype=np.uint8)
-        frames = {s: frame.copy() for s in renderer.stages}
-        result = renderer.render(frames, (1280, 720))
-        assert result.shape == (720, 1280, 3)
-
-
 class TestBackwardCompatibility:
     """Tests for backward compatibility with old configs."""
 
@@ -242,26 +209,3 @@ class TestPipelineVisualization:
         result = pipeline._draw_hud(frame, 50, 1000, 5, 3, 10)
         assert result.shape == frame.shape
 
-    def test_generate_stage_frames(self, config):
-        """Pipeline generates all stage frames."""
-
-        class MockDetector:
-            def detect(self, frame):
-                return []
-
-        class MockExtractor:
-            def extract(self, crops):
-                return []
-
-        pipeline = VideoReIDPipeline(
-            config, detector=MockDetector(), extractor=MockExtractor()
-        )
-
-        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
-        stages = pipeline._generate_stage_frames(frame, [])
-
-        assert "original" in stages
-        assert "detection" in stages
-        assert "reid" in stages
-        for stage_frame in stages.values():
-            assert stage_frame.shape == frame.shape
