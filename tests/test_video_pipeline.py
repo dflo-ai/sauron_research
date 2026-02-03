@@ -28,9 +28,9 @@ def test_pipeline_config_propagation(config):
 
 def test_pipeline_custom_components(config):
     """Test pipeline accepts custom components."""
-    from src.reid_research import PersonDetector, PersonGallery, ReIDFeatureExtractor
+    from src.reid_research import JointBDOEDetector, PersonGallery, ReIDFeatureExtractor
 
-    detector = PersonDetector(config)
+    detector = JointBDOEDetector(config)
     extractor = ReIDFeatureExtractor(config)
     gallery = PersonGallery(config)
 

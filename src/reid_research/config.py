@@ -10,8 +10,6 @@ class ModelConfig(BaseModel):
 
     reid_variant: str = "osnet_x1_0"
     reid_weights: str | None = None
-    yolo_weights: str = "yolo11s.pt"
-    detector_type: str = "yolo"  # "yolo" or "jointbdoe"
     device: str = "cuda"
     # FastReID configuration
     use_fastreid: bool = False

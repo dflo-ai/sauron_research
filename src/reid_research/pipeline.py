@@ -6,7 +6,7 @@ import numpy as np
 from tqdm import tqdm
 
 from .config import ReIDConfig
-from .detector import Detection, PersonDetector
+from .detector import Detection
 from .feature_extractor import ReIDFeatureExtractor
 from .gallery import PersonGallery
 from .jointbdoe_detector import JointBDOEDetector
@@ -31,7 +31,7 @@ class VideoReIDPipeline:
     def __init__(
         self,
         config: ReIDConfig,
-        detector: PersonDetector | None = None,
+        detector: JointBDOEDetector | None = None,
         extractor: ReIDFeatureExtractor | None = None,
         gallery: PersonGallery | None = None,
     ):
@@ -39,19 +39,14 @@ class VideoReIDPipeline:
 
         Args:
             config: ReIDConfig instance
-            detector: Optional detector (created based on config.model.detector_type)
+            detector: Optional JointBDOEDetector (created if None)
             extractor: Optional ReIDFeatureExtractor (created if None)
             gallery: Optional PersonGallery (created if None)
         """
         self.config = config
 
-        # Select detector based on config
-        if detector is not None:
-            self.detector = detector
-        elif config.model.detector_type == "jointbdoe":
-            self.detector = JointBDOEDetector(config)
-        else:
-            self.detector = PersonDetector(config)
+        # Use JointBDOE detector (person detection + ReID features in one model)
+        self.detector = detector or JointBDOEDetector(config)
 
         # Select extractor based on config: FastReID or torchreid OSNet
         if extractor is not None:
