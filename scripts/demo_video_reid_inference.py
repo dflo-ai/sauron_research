@@ -4,10 +4,12 @@
 Usage:
     python scripts/demo_video_reid_inference.py --video input.mp4 --output outputs/
     python scripts/demo_video_reid_inference.py --video input.mp4 --config configs/default.yaml
+    python scripts/demo_video_reid_inference.py --video input.mp4 --minutes 1.5
 """
 import argparse
 import json
 import sys
+import cv2
 from pathlib import Path
 
 # Add src to path
@@ -64,6 +66,13 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Distance threshold for rank voting (default: auto/median)",
+    )
+    parser.add_argument(
+        "--minutes",
+        "-m",
+        type=float,
+        default=None,
+        help="Process only first N minutes of video",
     )
     parser.add_argument(
         "--no-video",
@@ -159,11 +168,21 @@ def main() -> int:
     print("Initializing pipeline...")
     pipeline = VideoReIDPipeline(config)
 
+    # Calculate max frames if minutes provided
+    max_frames = None
+    if args.minutes:
+        cap = cv2.VideoCapture(str(video_path))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        cap.release()
+        max_frames = int(args.minutes * 60 * fps)
+        print(f"Limiting to {args.minutes} minutes ({max_frames} frames)")
+
     # Process video
     print(f"Processing: {video_path}")
     stats = pipeline.process_video(
         video_path=video_path,
         output_path=output_video if config.output.save_video else None,
+        max_frames=max_frames,
     )
 
     # Export results
