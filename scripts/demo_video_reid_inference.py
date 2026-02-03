@@ -52,6 +52,19 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override similarity threshold",
     )
+    # Rank-list majority voting options
+    parser.add_argument(
+        "--rank-list-size",
+        type=int,
+        default=None,
+        help="Top-k entries in rank list for voting (default: 20, max: 50)",
+    )
+    parser.add_argument(
+        "--rank-threshold",
+        type=float,
+        default=None,
+        help="Distance threshold for rank voting (default: auto/median)",
+    )
     parser.add_argument(
         "--no-video",
         action="store_true",
@@ -101,6 +114,12 @@ def main() -> int:
         config.inference.similarity_threshold = args.threshold
     if args.no_video:
         config.output.save_video = False
+
+    # Rank-list voting overrides
+    if args.rank_list_size:
+        config.gallery.rank_list_size = min(args.rank_list_size, 50)
+    if args.rank_threshold:
+        config.gallery.rank_distance_threshold = args.rank_threshold
 
     # Visualization overrides
     if args.no_gallery:
