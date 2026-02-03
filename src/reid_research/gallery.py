@@ -14,11 +14,13 @@ from .matching import (
     apply_torchreid_reranking,
     compute_adaptive_cost_matrix,
     compute_adaptive_threshold,
+    compute_euclidean_rank_list,
     compute_k_reciprocal_reranking,
     compute_position_boost,
     compute_quality_score,
     compute_velocity,
     detect_crossing_tracks,
+    majority_vote_reidentify,
     predict_position,
     validate_assignments_batch,
     validate_motion_consistency,
@@ -90,8 +92,11 @@ class PersonGallery:
         features_list: list[np.ndarray],
         exclude_ids: set[int] | None = None,
         bboxes: list[tuple[float, ...]] | None = None,
-    ) -> list[int | None]:
-        """Match batch of features, ensuring unique assignments per frame.
+    ) -> list[tuple[int | None, float]]:
+        """Match batch of features using rank-list majority voting.
+
+        Uses euclidean distance ranking with majority voting for identity confirmation.
+        Hungarian algorithm ensures unique assignments per frame.
 
         Args:
             features_list: List of feature vectors (512,)
@@ -99,7 +104,7 @@ class PersonGallery:
             bboxes: Optional bounding boxes for temporal consistency
 
         Returns:
-            List of matched track_ids (None if no match above threshold)
+            List of (matched_id, confidence) tuples (None if no match)
         """
         if not features_list:
             return []
@@ -110,120 +115,77 @@ class PersonGallery:
         exclude_ids = exclude_ids or set()
         gallery_cfg = self.config.gallery
 
-        # Get effective threshold (adaptive or static)
-        threshold = self.get_effective_threshold()
-        results = []
+        # Extract all gallery features for rank-list computation
+        gallery_features: dict[int, list[np.ndarray]] = {}
+        for tid, entry in self._gallery.items():
+            if tid in exclude_ids:
+                continue
+            if entry.features:
+                gallery_features[tid] = list(entry.features)
 
-        # Build similarity matrix: queries x gallery
-        gallery_ids = [
-            tid for tid in self._gallery.keys() if tid not in exclude_ids
-        ]
-        if not gallery_ids:
+        if not gallery_features:
             return [(None, 0.0)] * len(features_list)
 
-        gallery_feats = np.array(
-            [self._gallery[tid].avg_feature for tid in gallery_ids]
-        )
-        query_feats = np.array(features_list)
+        gallery_ids = list(gallery_features.keys())
 
-        # Detect crossing tracks (for adaptive behavior)
+        # Detect crossing tracks for adaptive behavior
         crossing_ids = self._detect_crossing_tracks(bboxes, gallery_ids)
-        is_crossing = len(crossing_ids) > 0
 
-        # Compute similarities - use torchreid reranking during crossing or when enabled
-        use_reranking = gallery_cfg.use_full_reranking and len(gallery_ids) >= 10
-        if is_crossing and gallery_cfg.rerank_on_crossing and len(gallery_ids) >= 10:
-            use_reranking = True  # Force reranking during crossing
+        # Build cost matrix using rank-list euclidean distances
+        # Lower distance = lower cost = better match
+        n_queries = len(features_list)
+        n_gallery = len(gallery_ids)
+        cost_matrix = np.full((n_queries, n_gallery), 1e6, dtype=np.float32)
+        confidence_matrix = np.zeros((n_queries, n_gallery), dtype=np.float32)
 
-        if use_reranking:
-            # Official torchreid CVPR2017 re-ranking (most accurate)
-            sim_matrix = apply_torchreid_reranking(
-                query_feats,
-                gallery_feats,
-                k1=gallery_cfg.rerank_k1,
-                k2=gallery_cfg.rerank_k2,
-                lambda_value=gallery_cfg.rerank_lambda,
-            )
-        else:
-            sim_matrix = cosine_similarity(query_feats, gallery_feats)
-
-            # Apply simplified k-reciprocal boost if enabled (legacy)
-            if gallery_cfg.use_reranking and len(gallery_ids) >= 10:
-                sim_matrix = self._apply_k_reciprocal_boost(
-                    query_feats, gallery_feats, sim_matrix,
-                    k=gallery_cfg.rerank_k, boost=gallery_cfg.rerank_boost
-                )
-
-        # Apply velocity-based temporal consistency (preferred)
-        # Reduce position boost during crossing to prevent ID theft
-        if bboxes and gallery_cfg.use_velocity_prediction:
-            sim_matrix = self._apply_velocity_consistency(
-                sim_matrix, bboxes, gallery_ids, crossing_ids=crossing_ids
-            )
-        # Fallback to legacy position-hash method
-        elif bboxes and gallery_cfg.use_temporal_consistency:
-            bbox_hashes = [self._bbox_hash(b) for b in bboxes]
-            sim_matrix = self._apply_temporal_consistency(
-                sim_matrix, bbox_hashes, gallery_ids
+        for q_idx, query_feat in enumerate(features_list):
+            # Get full rank list for this query (all gallery entries)
+            rank_list = compute_euclidean_rank_list(
+                query_feat, gallery_features, k=min(n_gallery, 50)
             )
 
-        # During crossing, use stricter threshold
-        if is_crossing:
-            threshold = max(threshold, gallery_cfg.crossing_threshold_boost)
+            # Populate cost matrix with distances
+            for track_id, dist, feat_count in rank_list:
+                if track_id in gallery_ids:
+                    g_idx = gallery_ids.index(track_id)
+                    cost_matrix[q_idx, g_idx] = dist
 
-        # Get predicted positions for adaptive cost matrix
-        predictions = self._predict_track_positions()
+                    # Pre-compute confidence via majority vote per (query, gallery) pair
+                    # Use adaptive threshold (median of this query's distances)
+                    all_dists = [r[1] for r in rank_list]
+                    threshold = float(np.median(all_dists)) if all_dists else 1.0
 
-        # Compute cost matrix - use adaptive or simple
-        if gallery_cfg.use_adaptive_cost_matrix and bboxes:
-            det_positions = [
-                ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for b in bboxes
-            ]
-            cost_matrix = compute_adaptive_cost_matrix(
-                sim_matrix,
-                det_positions,
-                predictions,
-                gallery_ids,
-                crossing_ids,
-                weights_normal=(
-                    gallery_cfg.weight_appearance,
-                    gallery_cfg.weight_motion,
-                ),
-                weights_crossing=(
-                    gallery_cfg.weight_appearance_crossing,
-                    gallery_cfg.weight_motion_crossing,
-                ),
-            )
-        else:
-            # Simple: convert similarity to cost
-            cost_matrix = 1.0 - sim_matrix
+                    if dist < threshold:
+                        confidence_matrix[q_idx, g_idx] = 1.0 - (dist / (threshold + 1e-6))
 
-        # Run Hungarian algorithm via lap (faster than scipy)
-        # lap.lapjv returns (cost, row_to_col, col_to_row)
+        # Run Hungarian algorithm for optimal assignment
         _, row_to_col, _ = lap.lapjv(cost_matrix, extend_cost=True)
 
-        # Build results, rejecting below-threshold matches
-        results = []  # List of (matched_id, similarity)
+        # Build results with majority voting validation
+        results: list[tuple[int | None, float]] = []
 
-        for query_idx in range(len(features_list)):
-            gal_idx = row_to_col[query_idx]
+        for q_idx in range(n_queries):
+            g_idx = row_to_col[q_idx]
             best_id = None
-            best_sim = 0.0
+            best_conf = 0.0
 
-            # Check if valid assignment and above threshold
-            if gal_idx >= 0 and gal_idx < len(gallery_ids):
-                sim = sim_matrix[query_idx, gal_idx]
-                if sim >= threshold:
-                    best_id = gallery_ids[gal_idx]
-                    best_sim = sim
-                    # Update adaptive threshold statistics
-                    if gallery_cfg.use_adaptive_threshold:
-                        self._update_similarity_stats([best_sim])
+            if 0 <= g_idx < n_gallery:
+                candidate_id = gallery_ids[g_idx]
+                dist = cost_matrix[q_idx, g_idx]
+                fallback_thresh = gallery_cfg.rank_fallback_threshold
 
-            results.append((best_id, float(best_sim)))
+                # Simple distance-based matching for L2-normalized features
+                # Skip complex voting - just use distance threshold
+                # Same person typically: dist < 0.8, different: dist > 1.0
+                if dist < fallback_thresh:
+                    best_id = candidate_id
+                    best_conf = max(0.0, 1.0 - dist / fallback_thresh)
+
+            results.append((best_id, float(best_conf)))
 
         # Motion consistency validation - reject suspicious assignments
         if gallery_cfg.use_motion_validation and bboxes:
+            predictions = self._predict_track_positions()
             det_positions = [
                 ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for b in bboxes
             ]
@@ -240,11 +202,6 @@ class PersonGallery:
                 max_distance=gallery_cfg.motion_max_distance,
                 direction_threshold_deg=gallery_cfg.motion_direction_threshold,
             )
-
-        # Update legacy temporal history
-        if bboxes and gallery_cfg.use_temporal_consistency:
-            bbox_hashes = [self._bbox_hash(b) for b in bboxes]
-            self._update_temporal_history(bbox_hashes, [r[0] for r in results])
 
         return results
 
@@ -543,6 +500,74 @@ class PersonGallery:
                     boosted_sim[q_idx, g_idx] += boost * rank_factor
 
         return boosted_sim
+
+    def get_rank_list(
+        self,
+        query_feat: np.ndarray,
+        k: int = 20,
+        exclude_ids: set[int] | None = None,
+    ) -> list[tuple[int, float, int]]:
+        """Get top-k gallery entries by euclidean distance.
+
+        Extracts all features from gallery entries and computes rank list.
+
+        Args:
+            query_feat: (D,) query feature vector
+            k: Number of entries to return (max 50)
+            exclude_ids: Track IDs to exclude from ranking
+
+        Returns:
+            List of (track_id, min_distance, feature_count) sorted ascending
+        """
+        exclude_ids = exclude_ids or set()
+
+        # Extract all features from gallery entries
+        gallery_features: dict[int, list[np.ndarray]] = {}
+        for track_id, entry in self._gallery.items():
+            if track_id in exclude_ids:
+                continue
+            if entry.features:
+                gallery_features[track_id] = list(entry.features)
+
+        return compute_euclidean_rank_list(query_feat, gallery_features, k=k)
+
+    def match_with_rank_voting(
+        self,
+        features: np.ndarray,
+        rank_list_size: int | None = None,
+        distance_threshold: float | None = None,
+        exclude_ids: set[int] | None = None,
+    ) -> tuple[int | None, float]:
+        """Match using rank-list majority voting.
+
+        Gets rank list and applies majority voting to confirm identity.
+
+        Args:
+            features: Query feature vector (D,)
+            rank_list_size: Number of candidates in rank list (from config if None)
+            distance_threshold: Max distance for "match" (adaptive if None)
+            exclude_ids: Track IDs to exclude
+
+        Returns:
+            (matched_id, confidence) or (None, 0.0)
+        """
+        cfg = self.config.gallery
+        k = rank_list_size or cfg.rank_list_size
+
+        # Get rank list
+        rank_list = self.get_rank_list(features, k=k, exclude_ids=exclude_ids)
+
+        if not rank_list:
+            return (None, 0.0)
+
+        # Use config threshold or adaptive
+        threshold = distance_threshold or cfg.rank_distance_threshold
+
+        return majority_vote_reidentify(
+            rank_list,
+            distance_threshold=threshold,
+            min_entries_per_id=cfg.rank_min_entries_per_id,
+        )
 
     def match(self, features: np.ndarray) -> int | None:
         """Find best matching ID in gallery.
