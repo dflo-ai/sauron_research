@@ -11,6 +11,8 @@ class ModelConfig(BaseModel):
     reid_variant: str = "osnet_x1_0"
     reid_weights: str | None = None
     device: str = "cuda"
+    # JointBDOE detector weights
+    yolo_weights: str = "data/weights/jointbdoe_m.pt"
     # FastReID configuration
     use_fastreid: bool = False
     fastreid_config: str = "fast-reid/configs/Market1501/sbs_R50-ibn.yml"
@@ -32,6 +34,12 @@ class GalleryConfig(BaseModel):
 
     max_features_per_id: int = 10
     ema_alpha: float = 0.7
+
+    # Rank-list majority voting (triplet-loss style)
+    rank_list_size: int = 20  # Top-k entries in rank list (max 50)
+    rank_distance_threshold: float | None = None  # Auto (median) if None
+    rank_min_entries_per_id: int = 3  # Min entries before voting kicks in
+    rank_fallback_threshold: float = 1.2  # Distance threshold for early matching
 
     # k-reciprocal re-ranking (improves accuracy +3-5% mAP)
     use_reranking: bool = False

@@ -2,7 +2,7 @@
 model:
   reid_variant: "osnet_x1_0"       # osnet_x1_0 (validated: best accuracy)
   reid_weights: null               # null = auto-download pretrained
-  yolo_weights: "weights/coco_l_1024_e500_t010_w005_best.pt"  # JointBDOE-L (largest available)
+  yolo_weights: "data/weights/jointbdoe_m.pt"  # JointBDOE-M (same as sauron-services)
   detector_type: "jointbdoe"       # "yolo" or "jointbdoe"
   device: "cuda"                   # cuda (validated)
   # FastReID configuration (SBS R50-ibn: 89.3% mAP, 2048-dim features)
@@ -14,12 +14,18 @@ model:
 inference:
   image_size: [512, 256]           # ReID crop size (H, W)
   batch_size: 32                   # Feature extraction batch
-  confidence_threshold: 0.8        # YOLO detection confidence
+  confidence_threshold: 0.7        # YOLO detection confidence
   similarity_threshold: 0.8        # ReID cosine similarity (stricter to prevent ID theft)
 
 gallery:
   max_features_per_id: 200         # Rolling window size
   ema_alpha: 0.6                   # Feature update weight
+
+  # Rank-list majority voting (triplet-loss style)
+  rank_list_size: 20               # Top-k entries in rank list
+  rank_distance_threshold: 1.0     # Fixed threshold for voting
+  rank_min_entries_per_id: 3       # Min features before voting kicks in
+  rank_fallback_threshold: 2.0     # Distance threshold for matching (max for L2-normalized)
 
   # Simplified k-reciprocal re-ranking (+3-5% mAP)
   use_reranking: false             # Simplified boost (superseded by full reranking)
