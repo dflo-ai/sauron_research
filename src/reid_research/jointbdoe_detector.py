@@ -1,9 +1,15 @@
 """JointBDOE person detection wrapper - optimized for human detection."""
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import torch
+
+# Add JointBDOE models/utils to path BEFORE importing (required for torch.load unpickling)
+_JOINTBDOE_PATH = Path(__file__).parent / "detectors" / "jointbdoe"
+if str(_JOINTBDOE_PATH) not in sys.path:
+    sys.path.insert(0, str(_JOINTBDOE_PATH))
 
 from .config import ReIDConfig
 from .detectors.jointbdoe import (
