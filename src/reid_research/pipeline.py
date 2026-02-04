@@ -16,6 +16,7 @@ from .visualization import (
     GalleryPanelEntry,
     HUDRenderer,
     ExtendedFrameRenderer,
+    IDSwitchCapturer,
 )
 
 
@@ -79,6 +80,9 @@ class VideoReIDPipeline:
         # Extended frame renderer (analytics outside video)
         self._extended_renderer = ExtendedFrameRenderer(config.visualization)
         self._recent_matches: list[dict] = []  # Track recent ID matches for bottom bar
+
+        # ID switch capturer (initialized per video in process_video)
+        self._id_switch_capturer: IDSwitchCapturer | None = None
 
     def process_frame(self, frame: np.ndarray) -> list[Detection]:
         """Process single frame: detect -> extract -> match.
@@ -362,6 +366,18 @@ class VideoReIDPipeline:
         if not cap.isOpened():
             raise ValueError(f"Cannot open video: {video_path}")
 
+        # Initialize ID switch capturer if enabled
+        if self.config.debug.capture_id_switches:
+            output_dir = Path(self.config.debug.id_switch_output_dir) / video_path.stem
+            self._id_switch_capturer = IDSwitchCapturer(
+                output_dir=output_dir,
+                frames_before=self.config.debug.id_switch_frames_before,
+                frames_after=self.config.debug.id_switch_frames_after,
+                enabled=True,
+            )
+        else:
+            self._id_switch_capturer = None
+
         # Video properties
         self.fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -395,6 +411,10 @@ class VideoReIDPipeline:
             detections = self.process_frame(frame)
             stats["frames"] += 1
             stats["detections"] += len(detections)
+
+            # Push frame to ID switch capturer (if enabled)
+            if self._id_switch_capturer:
+                self._id_switch_capturer.push_frame(frame, stats["frames"], detections)
 
             # Count ReID matches and unique IDs (exclude tentative tracks with negative IDs)
             frame_matches = 0
@@ -450,6 +470,12 @@ class VideoReIDPipeline:
             pbar.update(1)
 
         pbar.close()
+
+        # Flush any pending ID switch captures
+        if self._id_switch_capturer:
+            self._id_switch_capturer.flush()
+            if self._id_switch_capturer.switch_count > 0:
+                print(f"Captured {self._id_switch_capturer.switch_count} ID switches to {self._id_switch_capturer._output_dir}")
 
         cap.release()
         if writer:

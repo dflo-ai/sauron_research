@@ -117,6 +117,16 @@ class OutputConfig(BaseModel):
     visualization: bool = True
 
 
+class DebugConfig(BaseModel):
+    """Debug and diagnostic configuration."""
+
+    # ID switch frame capture (for investigating Re-ID failures)
+    capture_id_switches: bool = False  # Enable ID switch frame capture
+    id_switch_output_dir: str = "outputs/id_switches"  # Base output directory
+    id_switch_frames_before: int = 3  # Frames to capture before switch
+    id_switch_frames_after: int = 3  # Frames to capture after switch
+
+
 class ReIDConfig(BaseModel):
     """Root configuration model."""
 
@@ -125,6 +135,7 @@ class ReIDConfig(BaseModel):
     gallery: GalleryConfig = Field(default_factory=GalleryConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     visualization: VisualizationConfig = Field(default_factory=VisualizationConfig)
+    debug: DebugConfig = Field(default_factory=DebugConfig)
 
 
 def load_config(path: str | Path) -> ReIDConfig:

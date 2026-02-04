@@ -8,7 +8,7 @@ model:
 inference:
   image_size: [512, 256]           # ReID crop size (H, W)
   batch_size: 32                   # Feature extraction batch
-  confidence_threshold: 0.6        # YOLO detection confidence
+  confidence_threshold: 0.65        # YOLO detection confidence
   similarity_threshold: 0.8        # ReID cosine similarity (stricter to prevent ID theft)
 
 gallery:
@@ -74,3 +74,10 @@ visualization:
 
   # Extended frame layout (analytics outside video frame)
   extended_frame_enabled: true    # Stats/gallery in padding, ID matching at bottom
+
+# Debug and diagnostic settings
+debug:
+  capture_id_switches: false      # Enable ID switch frame capture for debugging
+  id_switch_output_dir: "outputs/id_switches"  # Base output directory
+  id_switch_frames_before: 3      # Frames to capture before switch
+  id_switch_frames_after: 3       # Frames to capture after switch
