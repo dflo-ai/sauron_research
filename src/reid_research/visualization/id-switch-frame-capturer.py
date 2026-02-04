@@ -115,10 +115,11 @@ class IDSwitchCapturer:
         """
         switches = []
         for det in detections:
-            # Only capture switches between permanent IDs (>= 0)
+            # Only capture actual switches between different permanent IDs (>= 0)
             # Skip tentative tracks (negative IDs) to avoid false positives
             if (det.previous_id is not None and det.track_id is not None
-                    and det.previous_id >= 0 and det.track_id >= 0):
+                    and det.previous_id >= 0 and det.track_id >= 0
+                    and det.previous_id != det.track_id):
                 switches.append((det.previous_id, det.track_id, det))
         return switches
 
@@ -186,56 +187,75 @@ class IDSwitchCapturer:
         self._pending_captures.clear()
 
     def _save_capture(self, capture: PendingCapture, is_incomplete: bool = False) -> None:
-        """Save captured frames to disk.
+        """Save captured frames to disk in a dedicated folder per switch.
+
+        Output structure:
+            {video}/switch_{N:03d}_id{old}_to_id{new}_f{frame}/
+                01_before_f{frame}.jpg
+                02_before_f{frame}.jpg
+                03_before_f{frame}.jpg
+                04_SWITCH_f{frame}_scene.jpg
+                05_SWITCH_f{frame}_crop.jpg
+                06_after_f{frame}.jpg
+                ...
 
         Args:
             capture: Completed PendingCapture with all frames
             is_incomplete: If True, capture has fewer after-frames than expected
         """
-        # Create output directory
-        self._output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Add incomplete indicator to filename prefix if applicable
+        # Create dedicated folder for this switch event
         incomplete_tag = "_INCOMPLETE" if is_incomplete else ""
-        prefix = f"{capture.old_id:03d}_to_{capture.new_id:03d}_frame_{capture.switch_frame_idx:06d}{incomplete_tag}"
+        folder_name = (
+            f"switch_{self._switch_count:03d}_"
+            f"id{capture.old_id:02d}_to_id{capture.new_id:02d}_"
+            f"f{capture.switch_frame_idx:06d}{incomplete_tag}"
+        )
+        switch_dir = self._output_dir / folder_name
+        switch_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save before frames
+        file_idx = 1
+
+        # Save before frames (numbered for chronological order)
         for i, frame_data in enumerate(capture.frames_before):
-            filename = f"{prefix}_before_{i + 1}.jpg"
+            filename = f"{file_idx:02d}_before_f{frame_data.frame_idx:06d}.jpg"
             annotated = self._annotate_frame(
                 frame_data.frame,
                 frame_data.detections,
                 highlight_ids={capture.old_id, capture.new_id},
             )
-            cv2.imwrite(str(self._output_dir / filename), annotated)
+            cv2.imwrite(str(switch_dir / filename), annotated)
+            file_idx += 1
 
         # Save switch frame (full scene and crop)
         if capture.switch_frame is not None:
             # Full scene
-            scene_filename = f"{prefix}_scene.jpg"
+            scene_filename = f"{file_idx:02d}_SWITCH_f{capture.switch_frame_idx:06d}_scene.jpg"
             annotated_scene = self._annotate_frame(
                 capture.switch_frame.frame,
                 capture.switch_frame.detections,
                 highlight_ids={capture.old_id, capture.new_id},
                 is_switch_frame=True,
             )
-            cv2.imwrite(str(self._output_dir / scene_filename), annotated_scene)
+            cv2.imwrite(str(switch_dir / scene_filename), annotated_scene)
+            file_idx += 1
 
             # Object crop
             if capture.switch_bbox is not None:
-                crop_filename = f"{prefix}_crop.jpg"
+                crop_filename = f"{file_idx:02d}_SWITCH_f{capture.switch_frame_idx:06d}_crop.jpg"
                 crop = self._extract_crop(capture.switch_frame.frame, capture.switch_bbox)
-                cv2.imwrite(str(self._output_dir / crop_filename), crop)
+                cv2.imwrite(str(switch_dir / crop_filename), crop)
+                file_idx += 1
 
         # Save after frames
         for i, frame_data in enumerate(capture.frames_after):
-            filename = f"{prefix}_after_{i + 1}.jpg"
+            filename = f"{file_idx:02d}_after_f{frame_data.frame_idx:06d}.jpg"
             annotated = self._annotate_frame(
                 frame_data.frame,
                 frame_data.detections,
                 highlight_ids={capture.old_id, capture.new_id},
             )
-            cv2.imwrite(str(self._output_dir / filename), annotated)
+            cv2.imwrite(str(switch_dir / filename), annotated)
+            file_idx += 1
 
     def _annotate_frame(
         self,

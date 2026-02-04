@@ -77,7 +77,7 @@ visualization:
 
 # Debug and diagnostic settings
 debug:
-  capture_id_switches: false      # Enable ID switch frame capture for debugging
+  capture_id_switches: true       # Enable ID switch frame capture for debugging
   id_switch_output_dir: "outputs/id_switches"  # Base output directory
   id_switch_frames_before: 3      # Frames to capture before switch
   id_switch_frames_after: 3       # Frames to capture after switch

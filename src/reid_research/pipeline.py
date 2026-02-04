@@ -530,17 +530,8 @@ class VideoReIDPipeline:
             # Animated fill effect (fades from 30% to 0% over FADE_DURATION frames)
             anim_frame = self._match_animations.get(track_id, self.FADE_DURATION)
             
-            # Flash effect for rematch
-            is_rematch = det.previous_id is not None
-            if is_rematch and anim_frame < self.FADE_DURATION:
-                # Flash by oscillating color or thickness
-                if (anim_frame // 3) % 2 == 0:
-                    color = (255, 255, 255)  # Flash white
-                    thickness = 6
-                else:
-                    thickness = 4
-            else:
-                thickness = 2 if anim_frame >= self.FADE_DURATION else (4 if anim_frame == 0 else 3)
+            # Standard thickness based on animation state
+            thickness = 2 if anim_frame >= self.FADE_DURATION else (4 if anim_frame == 0 else 3)
 
             if anim_frame < self.FADE_DURATION:
                 # Calculate fading opacity: 0.3 -> 0.0
@@ -580,20 +571,6 @@ class VideoReIDPipeline:
                     cv2.putText(vis, sim_label, (x1 + 3, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 255), 1)
                     y_offset += sh + 6
 
-            # Draw rematch info: [ID:10 (00:10) --> ID:01 (00:11)]
-            # Show rematch info for REMATCH_DISPLAY_SECONDS
-            rematch_frames = self.fps * self.REMATCH_DISPLAY_SECONDS
-            if is_rematch and anim_frame < rematch_frames:
-                prev_time = self._format_time(det.previous_id_timestamp or 0)
-                curr_time = self._format_time(self.gallery._frame_idx)
-                rematch_label = f"[ID:{det.previous_id:02d} ({prev_time}) --> ID:{track_id:02d} ({curr_time})]"
-                
-                (rtw, rth), _ = cv2.getTextSize(rematch_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                # Draw directly above bbox since main label moved to middle
-                cv2.rectangle(vis, (x1, y1 - rth - 10), (x1 + rtw + 4, y1), (0, 0, 0), -1)
-                cv2.putText(
-                    vis, rematch_label, (x1 + 2, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1
-                )
 
         # Step animation counters
         for tid in list(self._match_animations.keys()):
