@@ -4,7 +4,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      Video Input Stream                          │
+│                      Video Input Stream                         │
 └──────────────────────────┬──────────────────────────────────────┘
                            │
                     ┌──────▼──────┐
@@ -13,11 +13,11 @@
                            │ Detections(N): box, conf, orientation
                            │
                     ┌──────▼───────────┐
-                    │  Extractor      │ (OSNet/FastReID)
+                    │  Extractor       │ (OSNet/FastReID)
                     └──────┬───────────┘
                            │ Features(N, 512-dim), normalized
                            │
-                    ┌──────▼──────────────────┐
+                    ┌──────▼─────────────────┐
                     │  Track Assignment      │
                     │  - Hungarian matching  │
                     │  - Rank-list voting    │
@@ -32,177 +32,119 @@
                     │  - Motion tracking  │
                     └──────┬──────────────┘
                            │
-                    ┌──────▼─────────────┐
+                    ┌──────▼────────────┐
                     │  Visualization    │
                     │  - Render boxes   │
                     │  - Gallery panel  │
                     │  - HUD stats      │
                     └──────┬────────────┘
                            │
-                    ┌──────▼──────────────┐
-                    │  Output            │
-                    │  - Video file      │
+                    ┌──────▼─────────────┐
+                    │   Output           │
+                    │   - Video file     │
                     │  - JSON tracks     │
                     └────────────────────┘
 ```
 
 ## 2. Pipeline Processing Flow
 
-### Frame Processing Pipeline
+### Pipeline I/O Specification
 
-**Input:** RGB frame (H, W, 3), frame_index
+| Stage | Input | Output | Data Shape | Key Config |
+|-------|-------|--------|-----------|------------|
+| **1. Detection** | Frame (BGR) | List[Detection] N items | (H,W,3) → N×(4+1+360°) | conf≥0.75 |
+| **2. Extraction** | Crops list, batch=32 | Features matrix | N×(256,128) → (N,512) | L2-normalized |
+| **3. Assignment** | Features (N,512), gallery M | Assignments (N,) | (N,512) × (M,512) → (N,) IDs | k=20, dist<1.2 |
+| **4. Motion Valid.** | Assignments, track history | Validated assignments | (N,) → (N,) bool mask | dist<150px, angle<120° |
+| **5. ID Assignment** | Validated, detection objects | Detection.track_id ↑ | (N,) matched IDs | perm: +, tent: − |
+| **6. Gallery Update** | Detections+track_id, features | GalleryEntry state ↑ | EMA: α×qual×feat | α=0.7, qual>0.3 |
 
-**Output:** Frame with IDs + JSON track entry
+### Stage 1: Detection (JointBDOE)
 
-### Stage 1: Detection
+**Input:** `np.ndarray (H, W, 3) BGR`
 
-```python
-# Input: frame (H, W, 3)
-detections = detector.detect(frame)
-# Output: List[Detection]
-#   - box: (x1, y1, x2, y2)
-#   - conf: float [0, 1]
-#   - orientation: float (optional)
-#   - feature: None (extracted next)
-```
+**Output:** `List[Detection]` with fields:
+- `bbox: (x1, y1, x2, y2)` - pixel coordinates
+- `confidence: float [0,1]` - detection score
+- `crop: np.ndarray (H', W', 3) BGR` - 10px padded region
+- `orientation: float | None` - degrees (0-360)
 
-**Key Parameters:**
-```yaml
-inference:
-  confidence_threshold: 0.75  # Min confidence to keep detection
-```
+**Processing:** Letterbox→1024×1024, NMS conf=0.75, scale back, extract crops
 
-### Stage 2: Feature Extraction
+### Stage 2: Feature Extraction (OSNet x1.0)
 
-```python
-# Input: frame, detections
-features = extractor.extract(frame, detections)
-# Output: np.ndarray (N, 512-dim)
-#   - L2-normalized vectors
-#   - One per detection
+**Input:** `List[np.ndarray]` crops (BGR), batch_size=32
 
-# Batch processing for efficiency
-batch_size = 32
-for i in range(0, len(detections), batch_size):
-    batch_detections = detections[i:i+batch_size]
-    batch_features = extractor.extract(frame, batch_detections)
-    detections[i:i+batch_size].features = batch_features
-```
+**Output:** `np.ndarray (N, 512) float32` - L2-normalized
 
-**Key Parameters:**
-```yaml
-model:
-  reid_variant: "osnet_x1_0"   # or fastreid
-  use_fastreid: false
-inference:
-  batch_size: 32
-  image_size: [512, 256]  # H, W
-```
+**Processing:** BGR→RGB, batch inference 256×128, vstack, L2 normalize each row
 
-### Stage 3: Track Assignment (Hungarian + Voting)
+### Stage 3: Hungarian Assignment + Rank-List Voting
 
-```python
-# Input: detections (N), gallery state (M tracks)
-# Process:
-distance_matrix = gallery.get_distance_matrix(features)  # (N, M)
-assignments = gallery.match_batch(features)              # (N, 2): [[det_idx, track_id], ...]
+**Input:**
+- Features `(N, 512)` from detections
+- Gallery state: M tracks with avg_features
+- Bboxes `(N,)` for motion context
 
-# Step 3a: Rank-list voting
-matched_ids = majority_vote_reidentify(distance_matrix, gallery_ids, k=20)
+**Output:** `List[tuple[int|None, float]]` - (matched_id, confidence)
 
-# Step 3b: Crossing detection (optional)
-if crossing_detected(current_detections, previous_tracks):
-    # Apply stricter threshold for crossing tracks
-    matched_ids = apply_crossing_threshold(matched_ids)
+**Algorithm:**
+1. Euclidean rank-list: top-k=50 neighbors per query
+2. Majority vote filtering: distance < 1.2
+3. Hungarian optimal assignment via `lap.lapjv()`
+4. Confidence = 1.0 - (distance / 1.2)
 
-# Step 3c: Hungarian assignment
-assignments = lap.linear_sum_assignment(-confidence_scores)
-```
+### Stage 4: Motion Validation & Crossing Detection
 
-**Key Parameters:**
-```yaml
-gallery:
-  rank_list_size: 20               # Top-k for voting
-  rank_distance_threshold: 1.0     # Voting cutoff
-  similarity_threshold: 0.8        # Match acceptance
-  use_crossing_detection: true
-  crossing_threshold_boost: 0.6    # Stricter during crossing
-```
+**Input:**
+- Assignments: `(N,)` track IDs
+- Track positions, velocities, directions
+- Bboxes `(N,)` current detections
 
-### Stage 4: Motion Validation
+**Output:**
+- Crossing set: `set[int]` IDs involved in crosses
+- Validated assignments: `(N,) bool` mask
 
-```python
-# Input: assignments, current detections, motion history
-# Process:
-for det_idx, track_id in assignments:
-    motion = gallery._track_motion[track_id]
-    predicted_pos = predict_position(motion)
+**Motion Validation:**
+- Position check: distance from prediction < 150px
+- Direction check: angle change < 120°
+- Exemptions: stationary tracks (speed < 5px/frame)
 
-    # Check velocity constraint
-    if not validate_motion_consistency(motion, det_idx, max_distance=150.0):
-        # Reject assignment
-        assignments[det_idx] = -1  # No match
-```
+**Crossing Detection:**
+- Distance < 100px AND converging velocities, OR
+- Bbox IoU > 0.1 → stricter threshold applied
 
-**Key Parameters:**
-```yaml
-gallery:
-  use_velocity_prediction: true
-  velocity_history_frames: 5       # Frames to average
-  motion_max_distance: 150.0       # Max pixels from prediction
-  motion_direction_threshold: 120.0  # Max angle change (degrees)
-```
+### Stage 5: ID Assignment (Tentative→Permanent)
 
-### Stage 5: Gallery Update & Tentative Confirmation
+**Input:**
+- Validated assignments `(N,)`
+- Detection objects with features
 
-```python
-# Input: assignments, detections, features
-# Process:
-for det_idx, track_id in assignments:
-    if track_id == -1:
-        # New detection: create tentative track
-        tentative_id = next_tentative_id
-        tentative_tracks[tentative_id] = {
-            'box': detection.box,
-            'feature': features[det_idx],
-            'frame_count': 1,
-            'first_frame': frame_idx,
-        }
-    else:
-        # Existing track: update feature and motion
-        gallery.update_feature(track_id, features[det_idx], quality_score)
-        gallery.update_motion(track_id, detection.box.center)
+**Output:** `Detection.track_id` populated (positive=permanent, negative=tentative)
 
-        # Check if tentative → permanent
-        if track_id < 0:  # Tentative
-            if tentative_tracks[track_id]['frame_count'] >= min_frames_for_id:
-                # Promote to permanent
-                permanent_id = gallery.new_id()
-                gallery._gallery[permanent_id] = tentative_tracks[track_id]
-                track_id = permanent_id
-```
+**Logic:**
+- Matched to gallery → set `track_id` (positive)
+- New detection → create tentative (negative ID)
+- Tentative promotion: ≥5 consecutive frames → increment positive ID
+- Pruning: delete tentative if unseen > 10 frames
 
-**Key Parameters:**
-```yaml
-gallery:
-  min_frames_for_id: 5         # Frames before permanent
-  tentative_max_age: 10        # Max unconfirmed age
-  ema_alpha: 0.6               # Feature update weight
-```
+### Stage 6: Gallery Update & Visualization
 
-### Stage 6: Visualization
+**Input:**
+- Detections with `track_id`, features, quality_score
+- Bboxes for motion update
 
-```python
-# Input: frame, detections with IDs, gallery state
-# Process:
-output_frame = extended_frame_renderer.render_frame(
-    frame,
-    detections_with_ids,
-    gallery_thumbnails,
-    hud_stats,
-)
-# Output: np.ndarray with annotations
-```
+**Output:**
+- Updated `GalleryEntry` per ID
+- Rendered frame with annotations
+
+**Gallery Update (EMA):**
+- Quality: `(confidence × 0.6) + (geometry × 0.4)`
+- Skip if quality < 0.3
+- Feature deque: maxlen=10, avg_feature = α × qual × feat + (1−α) × old_avg
+- Motion: push center position, compute velocity, store direction angle
+
+**Visualization:** Extended frame + gallery panel (200px) + HUD
 
 ## 3. Data Structures & Memory Layout
 

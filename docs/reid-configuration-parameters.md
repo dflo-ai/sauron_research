@@ -25,6 +25,19 @@ visualization:
 
 ---
 
+## Pipeline I/O Specification
+
+| Stage | Input | Output | Data Shape | Key Config |
+|-------|-------|--------|-----------|------------|
+| **1. Detection** | Frame (BGR) | List[Detection] N items | (H,W,3) → N×(bbox,conf,orientation) | `confidence_threshold`≥0.75 |
+| **2. Extraction** | Crops list, batch=32 | Features matrix | N×(256,128) → (N,512) float32 | `image_size`, `batch_size` |
+| **3. Assignment** | Features (N,512), gallery M | Assignments (N,) | (N,512) × (M,512) → (N,) IDs | `rank_list_size`=20, `similarity_threshold` |
+| **4. Motion Valid.** | Assignments, track history | Validated assignments | (N,) → (N,) bool mask | `motion_max_distance`<150px |
+| **5. ID Assignment** | Validated, detections | Detection.track_id | (N,) matched IDs | `min_frames_for_id`=5 |
+| **6. Gallery Update** | Detections+features | GalleryEntry state | EMA: α×qual×feat | `ema_alpha`=0.7, `quality_min_threshold`>0.3 |
+
+---
+
 ## 1. Model Configuration
 
 **Class:** `ModelConfig` | **Source:** `config.py:8-16`
@@ -735,7 +748,67 @@ gallery:
 
 ---
 
-## 8. Academic References
+## 8. Output File Schemas
+
+### 8.1 Tracks JSON (`*_tracks.json`)
+
+Pipeline tracking summary per video.
+
+```json
+{
+  "video": "data/videos/demo.mp4",
+  "config": {
+    "reid_variant": "osnet_x1_0",
+    "similarity_threshold": 0.8
+  },
+  "stats": {
+    "frames": 347,
+    "detections": 2654,
+    "unique_persons": 13
+  },
+  "persons": {
+    "0": { "feature_dim": 512 },
+    "1": { "feature_dim": 512 }
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `video` | string | Input video path |
+| `config` | object | Key config params used |
+| `stats.frames` | int | Total frames processed |
+| `stats.detections` | int | Total detections |
+| `stats.unique_persons` | int | Unique track IDs assigned |
+| `persons.<id>` | object | Per-person metadata |
+
+### 8.2 Gallery JSON (`*_gallery.json`)
+
+Final gallery state with stored features.
+
+```json
+{
+  "next_id": 13,
+  "frame_idx": 347,
+  "entries": {
+    "0": {
+      "avg_feature": [0.015, 0.035, ...],  // 512-dim float32
+      "last_seen": 267
+    }
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `next_id` | int | Next available track ID |
+| `frame_idx` | int | Last processed frame |
+| `entries.<id>.avg_feature` | float[512] | EMA-averaged L2-normalized feature |
+| `entries.<id>.last_seen` | int | Frame index last detected |
+
+---
+
+## 9. Academic References
 
 1. **OSNet** — Zhou, K., Yang, Y., Cavallaro, A., & Xiang, T. (2019). Omni-Scale Feature Learning for Person Re-Identification. *ICCV 2019*. [Paper](https://openaccess.thecvf.com/content_ICCV_2019/papers/Zhou_Omni-Scale_Feature_Learning_for_Person_Re-Identification_ICCV_2019_paper.pdf)
 
@@ -753,9 +826,9 @@ gallery:
 
 ---
 
-## 9. Appendix
+## 10. Appendix
 
-### 9.1 Default Configuration YAML
+### 10.1 Default Configuration YAML
 
 ```yaml
 model:
@@ -835,7 +908,7 @@ visualization:
   extended_frame_enabled: true
 ```
 
-### 9.2 Parameter Interaction Notes
+### 10.2 Parameter Interaction Notes
 
 | Interaction | Effect |
 |-------------|--------|

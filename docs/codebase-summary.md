@@ -45,10 +45,9 @@ Main orchestrator for end-to-end video processing.
 
 | Method | Input | Output | Purpose |
 |--------|-------|--------|---------|
-| `__init__()` | config, optional components | self | Initialize with detector, extractor, gallery |
-| `process_frame()` | np.ndarray (RGB frame) | List[Detection] | Detect → Extract → Match → Assign IDs |
-| `process_video()` | str/Path (video file) | list[dict] | Batch process entire video |
-| `write_output()` | results, output_path | None | Save video + JSON tracks |
+| `process_frame()` | frame (H,W,3) BGR | List[Detection] with track_id | Full pipeline: detect→extract→match→assign |
+| `process_video()` | str/Path video file | list[dict] tracks | Process entire video, populate gallery |
+| `write_output()` | results, output_path | None | Render + save video, write JSON |
 
 ### Internal State
 
@@ -131,38 +130,32 @@ class GalleryEntry:
 
 ### PersonGallery (Core Methods)
 
-| Method | Purpose | Returns |
-|--------|---------|---------|
-| `match_batch()` | Hungarian assignment for batch of detections | np.ndarray (N,2) assignments |
-| `update_feature()` | Add new feature, compute EMA average | None |
-| `get_distance_matrix()` | Compute cosine similarity distance matrix | np.ndarray (Q, G) distances |
-| `get_avg_feature()` | Retrieve averaged feature for ID | np.ndarray or None |
+| Method | Input | Output | Purpose |
+|--------|-------|--------|---------|
+| `match_batch()` | features (N,512), bboxes (N,) | [(id\|None, conf)] (N,) | Rank-list vote + Hungarian assignment |
+| `update()` | track_id, feature (512,), quality | None | EMA update feature: α×qual×f + (1−α)×old |
+| `get_distance_matrix()` | features (Q,512) | distances (Q, M) | L2 distance to gallery features |
+| `add()` | feature (512,) | new_id | Create new gallery entry |
 
-### Key Features
+### Key Algorithms
 
 **Rank-List Majority Voting:**
-```python
-# For each query feature:
-# 1. Find top-k similar gallery entries (k=20)
-# 2. Apply distance threshold filtering
-# 3. Count ID votes among top-k
-# 4. Return ID with max votes (or highest similarity if tie)
-```
+- Top-k=20 neighbors per query by L2 distance
+- Filter by threshold: distance < 1.2
+- Count ID votes, return ID with max votes
+- Confidence = 1.0 - (min_distance / 1.2)
 
 **Quality-Weighted Feature Fusion:**
-```python
-# Only update features if quality > threshold
-quality_score = (confidence * 0.6) + (geometry * 0.4)
-if quality_score >= min_threshold:
-    # EMA: avg_feature = ema_alpha * new_feature + (1-ema_alpha) * avg_feature
-    avg_feature = update_via_ema(new_feature, quality_score)
-```
+- Quality = 0.6×confidence + 0.4×geometry (aspect ratio + area)
+- Skip update if quality < 0.3
+- EMA update: `new_avg = α × quality × feature + (1−α) × old_avg` (α=0.7)
+- Feature buffer: deque maxlen=10, maintain rolling average
 
 **Velocity-Based Motion Tracking:**
-```python
-self._track_motion: dict[int, TrackMotion]  # Position history per track
-# Validates assignments: rejects if velocity > max_speed or angle > max_direction_change
-```
+- Track motion history: positions, velocities, directions
+- Position validation: distance from predicted < 150px
+- Direction validation: angle change < 120°
+- Stationary exemption: speed < 5px/frame bypass motion check
 
 ### Configuration Parameters
 
@@ -443,38 +436,42 @@ python scripts/demo_video_reid_inference.py \
 
 ## 10. Data Structures
 
-### Detection
+### Detection (JointBDOE Output)
 
 ```python
 @dataclass
 class Detection:
-    box: tuple              # (x1, y1, x2, y2)
-    conf: float             # Confidence [0, 1]
-    feature: np.ndarray     # Feature vector (512,) or (2048,)
-    track_id: int | None    # Assigned track ID (after matching)
-    orientation: float | None  # Body orientation (JointBDOE only)
+    bbox: tuple[float, 4]           # (x1, y1, x2, y2) pixel coords
+    confidence: float               # [0, 1] detection score
+    crop: np.ndarray               # (H', W', 3) BGR with 10px padding
+    orientation: float | None       # Degrees [0, 360] or None
+    track_id: int | None           # +id (permanent) or -id (tentative) after assignment
+    features: np.ndarray | None    # (512,) float32 after extraction
+    is_matched: bool               # True if ReID matched gallery entry
+    match_similarity: float        # Similarity score [0, 1]
+    top_similar: list[tuple]       # [(id, similarity), ...] top 3 matches
 ```
 
-### TrackMotion
+### TrackMotion (Velocity Tracking)
 
 ```python
 @dataclass
 class TrackMotion:
-    positions: deque        # Last N center positions
-    velocities: deque       # Last N velocity vectors
-    directions: deque       # Last N velocity directions (angles)
+    positions: deque[tuple]         # maxlen=5, center (x, y)
+    velocities: deque[tuple]        # maxlen=5, (vx, vy) px/frame
+    directions: deque[float]        # maxlen=5, angle degrees
 ```
 
-### GalleryEntry
+### GalleryEntry (Track Storage)
 
 ```python
 @dataclass
 class GalleryEntry:
-    features: deque         # Rolling window of feature vectors
-    quality_scores: deque   # Corresponding quality scores
-    avg_feature: np.ndarray # EMA-averaged feature
-    avg_quality: float      # Average quality
-    last_seen: int          # Last frame index
+    features: deque[np.ndarray]     # maxlen=10, (512,) each
+    quality_scores: deque[float]    # maxlen=10, [0, 1]
+    avg_feature: np.ndarray | None  # (512,) EMA-averaged
+    avg_quality: float              # Rolling average quality
+    last_seen: int                  # Frame index of last detection
 ```
 
 ## 11. Key Algorithms Summary
