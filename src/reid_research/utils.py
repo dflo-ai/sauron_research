@@ -1,5 +1,25 @@
 """Shared utilities for ReID research module."""
 import numpy as np
+import torch
+
+
+def safe_compile(model: torch.nn.Module, **kwargs) -> torch.nn.Module:
+    """Compile model with torch.compile if available, else return unchanged.
+
+    Args:
+        model: PyTorch model to compile
+        **kwargs: Arguments passed to torch.compile
+
+    Returns:
+        Compiled model or original model if compilation unavailable/fails
+    """
+    if not hasattr(torch, "compile"):
+        return model
+    try:
+        return torch.compile(model, **kwargs)
+    except Exception as e:
+        print(f"Warning: torch.compile failed ({e}), using eager mode")
+        return model
 
 
 def extract_crop(frame: np.ndarray, bbox: tuple, padding: int = 10) -> np.ndarray:

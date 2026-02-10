@@ -152,7 +152,11 @@ class FeatureExtractor:
                 image = self.preprocess(image)
                 images.append(image)
             images = torch.stack(images, dim=0)
-            images = images.to(self.device)
+            # Use pinned memory + non-blocking transfer for GPU
+            if self.device.type == "cuda":
+                images = images.pin_memory().to(self.device, non_blocking=True)
+            else:
+                images = images.to(self.device)
 
         elif isinstance(input, str):
             image = Image.open(input).convert("RGB")
@@ -172,7 +176,7 @@ class FeatureExtractor:
         else:
             raise NotImplementedError(f"Unsupported input type: {type(input)}")
 
-        with torch.no_grad():
+        with torch.inference_mode():
             features = self.model(images)
 
         return features

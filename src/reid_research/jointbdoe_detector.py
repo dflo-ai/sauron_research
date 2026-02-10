@@ -19,7 +19,7 @@ from .detectors.jointbdoe import (
     non_max_suppression,
     scale_coords,
 )
-from .utils import extract_crop
+from .utils import extract_crop, safe_compile
 
 
 @dataclass
@@ -71,13 +71,21 @@ class JointBDOEDetector:
         self._stride = int(self._model.stride.max())
         self._imgsz = check_img_size(self._imgsz, s=self._stride)
 
-        # Warmup
+        # Apply torch.compile for inference optimization
+        self._model = safe_compile(
+            self._model,
+            mode="reduce-overhead",
+            fullgraph=False,
+        )
+
+        # Warmup (triggers torch.compile graph capture)
         if self._device.type != "cpu":
-            self._model(
-                torch.zeros(1, 3, self._imgsz, self._imgsz)
-                .to(self._device)
-                .type_as(next(self._model.parameters()))
-            )
+            with torch.inference_mode():
+                self._model(
+                    torch.zeros(1, 3, self._imgsz, self._imgsz)
+                    .to(self._device)
+                    .type_as(next(self._model.parameters()))
+                )
 
     def detect(self, frame: np.ndarray) -> list[Detection]:
         """Detect persons in frame.
@@ -99,8 +107,11 @@ class JointBDOEDetector:
         if len(img.shape) == 3:
             img = img[None]  # Add batch dimension
 
-        # Inference
-        with torch.no_grad():
+        # Inference with FP16 autocast on GPU
+        use_cuda = self._device.type == "cuda"
+        ctx_autocast = torch.autocast(device_type="cuda", dtype=torch.float16) if use_cuda else torch.autocast(device_type="cpu", enabled=False)
+
+        with torch.inference_mode(), ctx_autocast:
             out = self._model(img, augment=False)[0]
             out = non_max_suppression(
                 out,

@@ -4,6 +4,7 @@ import torch
 
 from .config import ReIDConfig
 from .extractors import FeatureExtractor
+from .utils import safe_compile
 
 
 class ReIDFeatureExtractor:
@@ -20,7 +21,7 @@ class ReIDFeatureExtractor:
         self._device = config.model.device
 
     def _ensure_loaded(self) -> None:
-        """Lazy load the model on first use."""
+        """Lazy load the model on first use. Applies torch.compile if available."""
         if self._extractor is not None:
             return
 
@@ -33,6 +34,24 @@ class ReIDFeatureExtractor:
             image_size=inf_cfg.image_size,
             device=self._device,
         )
+
+        # Apply torch.compile for inference optimization
+        self._extractor.model = safe_compile(
+            self._extractor.model,
+            mode="reduce-overhead",
+            fullgraph=False,
+        )
+
+        # Warmup batch: trigger torch.compile graph capture + CUDA kernel caching
+        use_cuda = self._device.startswith("cuda") if isinstance(self._device, str) else str(self._device).startswith("cuda")
+        if use_cuda:
+            dummy = torch.randn(
+                inf_cfg.batch_size, 3, inf_cfg.image_size[0], inf_cfg.image_size[1],
+                device=self._device, dtype=torch.float16,
+            )
+            with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16):
+                _ = self._extractor.model(dummy)
+            torch.cuda.synchronize()
 
     def extract(self, crops: list[np.ndarray]) -> np.ndarray:
         """Extract features from batch of crops.
@@ -51,26 +70,34 @@ class ReIDFeatureExtractor:
         # Convert BGR to RGB (torchreid expects RGB)
         rgb_crops = [crop[:, :, ::-1] for crop in crops]
 
-        # Process in batches to avoid OOM
+        # Pre-allocate output array to avoid repeated vstack allocations
+        n_crops = len(rgb_crops)
         batch_size = self.config.inference.batch_size
-        all_features = []
+        features = np.empty((n_crops, 512), dtype=np.float32)
 
-        for i in range(0, len(rgb_crops), batch_size):
-            batch = rgb_crops[i : i + batch_size]
-            features = self._extractor(batch)
+        # Use inference_mode + FP16 autocast for GPU acceleration
+        use_cuda = self._device.startswith("cuda") if isinstance(self._device, str) else str(self._device).startswith("cuda")
+        ctx_autocast = torch.autocast(device_type="cuda", dtype=torch.float16) if use_cuda else torch.autocast(device_type="cpu", enabled=False)
 
-            # Convert to numpy if tensor
-            if isinstance(features, torch.Tensor):
-                features = features.cpu().numpy()
+        with torch.inference_mode(), ctx_autocast:
+            for i in range(0, n_crops, batch_size):
+                batch = rgb_crops[i : i + batch_size]
+                batch_features = self._extractor(batch)
 
-            all_features.append(features)
+                # Convert to numpy (cast back to float32 from FP16)
+                if isinstance(batch_features, torch.Tensor):
+                    batch_features = batch_features.float().cpu().numpy()
 
-        features = np.vstack(all_features)
+                # Write directly into pre-allocated array
+                end = min(i + batch_size, n_crops)
+                features[i:end] = batch_features
 
-        # L2 normalize features for consistent distance computation
+        # L2 normalize in-place
         norms = np.linalg.norm(features, axis=1, keepdims=True)
-        norms = np.maximum(norms, 1e-8)  # Avoid division by zero
-        return features / norms
+        np.maximum(norms, 1e-8, out=norms)
+        features /= norms
+
+        return features
 
     def extract_single(self, crop: np.ndarray) -> np.ndarray:
         """Extract features from single crop.

@@ -89,6 +89,19 @@ class GalleryConfig(BaseModel):
     min_frames_for_id: int = 5  # Min consecutive frames before assigning permanent ID
     tentative_max_age: int = 10  # Max frames to keep unconfirmed tentative track
 
+    # FAISS acceleration (Phase 4)
+    use_faiss: bool = True  # Use FAISS for gallery search (falls back to brute-force)
+    faiss_nlist: int = 64  # IVF clusters (sqrt of expected gallery size)
+    faiss_nprobe: int = 8  # Clusters to search per query
+    faiss_min_train_size: int = 100  # Min vectors before IVF (uses flat below this)
+    faiss_rebuild_interval: int = 50  # Frames between index rebuilds
+
+    # Selective re-ranking (Phase 5)
+    rerank_confidence_threshold: float = 0.7  # Trigger re-ranking below this confidence
+    rerank_distance_skip: float = 0.5  # Skip re-ranking if distance < this
+    rerank_cache_knn: bool = True  # Cache gallery k-NN graph for faster re-ranking
+    rerank_knn_rebuild_interval: int = 100  # Frames between k-NN cache rebuilds
+
 
 class VisualizationConfig(BaseModel):
     """Visualization configuration for video output."""

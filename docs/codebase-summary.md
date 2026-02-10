@@ -12,10 +12,12 @@ src/reid_research/
 ├── pipeline.py                     # Main orchestration
 ├── gallery.py                      # Track storage + matching
 ├── matching.py                     # Feature matching + re-ranking
-├── config.py                       # Configuration models
-├── jointbdoe_detector.py           # Primary detector wrapper
-├── feature_extractor.py            # OSNet extractor wrapper
-├── utils.py                        # Utilities
+├── config.py                       # Configuration models (updated: FAISS, rerank, optimize flags)
+├── jointbdoe_detector.py           # Primary detector (optimized: torch.compile + FP16)
+├── feature_extractor.py            # OSNet extractor (optimized: batch processing + pinned memory)
+├── utils.py                        # Utilities (new: safe_compile)
+├── faiss-gallery-index-wrapper.py  # FAISS IVF indexing wrapper (new)
+├── gallery-knn-cache-for-selective-reranking.py # k-NN cache module (new)
 ├── models/                         # Neural network architectures (ported)
 │   ├── __init__.py
 │   └── osnet.py                    # OSNet backbone (~400 LOC)
@@ -402,20 +404,117 @@ def get_id_color(track_id):
     """Returns RGB color for track ID (cyclic)"""
 ```
 
-## 8. Utilities: `utils.py` (59 LOC)
+## 8. Utilities: `utils.py` (79 LOC)
 
 ```python
+def safe_compile(model: torch.nn.Module, **kwargs) -> torch.nn.Module:
+    """Compile model with torch.compile if available, else return unchanged.
+
+    Graceful fallback for older PyTorch versions or compilation failures.
+    """
+
 def compute_iou(box1, box2) -> float:
     """Jaccard intersection over union"""
 
-def bbox_to_tlwh(box) -> tuple:
-    """Convert (x1,y1,x2,y2) → (top, left, width, height)"""
-
-def tlwh_to_bbox(tlwh) -> tuple:
-    """Convert (top, left, width, height) → (x1,y1,x2,y2)"""
+def extract_crop(frame, bbox, padding=10) -> np.ndarray:
+    """Extract person crop from frame with optional padding"""
 ```
 
-## 9. Entry Point: `demo_video_reid_inference.py` (210 LOC)
+## 9. Optimization Modules
+
+### FAISS Gallery Index: `faiss-gallery-index-wrapper.py` (5.6KB)
+
+Optional module for accelerated gallery search using FAISS (Facebook AI Similarity Search).
+
+```python
+class FAISSGalleryIndexWrapper:
+    """O(log n) gallery search via Inverted File (IVF) indexing
+
+    - IVF clustering for large galleries (>100 tracks)
+    - Graceful fallback to brute-force L2 distance if FAISS unavailable
+    - Configurable: nlist (clusters), nprobe (search width)
+    - Rebuild interval to maintain index freshness
+    """
+
+    def build_index(features: np.ndarray) -> None
+    def search_knn(query_feature: np.ndarray, k: int) -> (indices, distances)
+    def add_features(new_features: np.ndarray) -> None
+    def rebuild_if_needed() -> None
+```
+
+**Config Keys:**
+- `gallery.use_faiss`: Enable/disable (default: True)
+- `gallery.faiss_nlist`: IVF clusters (default: 64)
+- `gallery.faiss_nprobe`: Search width (default: 8)
+- `gallery.faiss_min_train_size`: Min vectors before IVF (default: 100)
+- `gallery.faiss_rebuild_interval`: Rebuild frequency (default: 50 frames)
+
+### Selective Re-ranking Cache: `gallery-knn-cache-for-selective-reranking.py` (3.7KB)
+
+Optional module for confidence-triggered k-reciprocal re-ranking with k-NN caching.
+
+```python
+class SelectiveRerankingCache:
+    """Cache k-NN graph to accelerate selective re-ranking
+
+    - Confidence threshold triggers re-ranking on low-confidence matches
+    - Pre-computed k-NN graph eliminates redundant distance calculations
+    - Distance skip optimization: bypass re-ranking if already confident
+    - Lazy rebuild on gallery updates
+    """
+
+    def compute_knn_graph(gallery_features: np.ndarray) -> None
+    def should_rerank(confidence: float) -> bool
+    def get_rerank_candidates(query_idx: int, k: int) -> list
+    def invalidate_cache() -> None
+```
+
+**Config Keys:**
+- `gallery.rerank_confidence_threshold`: Trigger threshold (default: 0.7)
+- `gallery.rerank_distance_skip`: Skip if distance < this (default: 0.5)
+- `gallery.rerank_cache_knn`: Enable caching (default: True)
+- `gallery.rerank_knn_rebuild_interval`: Cache rebuild (default: 100 frames)
+
+## 10. Performance Optimization Details
+
+### Detector Optimization: `jointbdoe_detector.py`
+
+```python
+# torch.compile + FP16 + inference_mode for 2-3× speedup
+model = safe_compile(model, mode="reduce-overhead")
+with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16):
+    outputs = model(x)  # Lower memory, faster inference
+```
+
+### Extractor Optimization: `feature_extractor.py`
+
+```python
+# Batch processing with pre-allocated tensors and pinned memory
+self.feature_buffer = torch.empty(batch_size, 512, pin_memory=True)  # Pre-alloc
+crops_tensor = torch.from_numpy(crops).to(self.device, non_blocking=True)  # Pinned copy
+
+# Warmup batch on first call to initialize GPU kernels
+with torch.inference_mode(), torch.autocast(...):
+    _ = model(warmup_batch)  # ~50ms one-time cost
+    features = model(crops_tensor)
+```
+
+### Benchmark & Validation Scripts
+
+**`scripts/benchmark-reid-pipeline-performance.py`**
+- Measures latency per pipeline stage (detect, extract, assign, etc.)
+- Tracks FPS, memory usage, throughput
+- Compares with/without FAISS, reranking, torch.compile
+- Output: JSON report with per-frame and per-stage metrics
+
+**`scripts/validate-reid-pipeline-accuracy.py`**
+- Validates re-ranking correctness (CVPR2017 algorithm)
+- Checks FAISS results match brute-force baseline
+- Tests k-NN cache invalidation on gallery updates
+- Verifies confidence-triggered selective re-ranking
+- Output: Test report with pass/fail per validation check
+
+## 11. Entry Point: `demo_video_reid_inference.py` (210 LOC)
 
 ```python
 def main():
@@ -474,44 +573,77 @@ class GalleryEntry:
     last_seen: int                  # Frame index of last detection
 ```
 
-## 11. Key Algorithms Summary
+## 12. Key Algorithms Summary
 
-| Algorithm | File | Purpose | Status |
-|-----------|------|---------|--------|
-| Hungarian Assignment | gallery.py | Optimal detections-to-tracks matching | ✓ lap library |
-| Rank-List Voting | matching.py | Triplet-loss weighted matching | ✓ Implemented |
-| k-Reciprocal Re-ranking | matching.py | CVPR2017 Jaccard distance | ✓ from torchreid |
-| Motion Validation | matching.py | Temporal consistency checking | ✓ Implemented |
-| Quality Weighting | matching.py | Confidence + geometry fusion | ✓ Implemented |
-| Crossing Detection | matching.py | Prevent ID theft at crossings | ✓ Implemented |
-| Adaptive Threshold | matching.py | Dynamic similarity adjustment | ✓ Implemented |
+| Algorithm | File | Purpose | Optimization |
+|-----------|------|---------|---------------|
+| Hungarian Assignment | gallery.py | Optimal detections-to-tracks matching | lap library |
+| Rank-List Voting | matching.py | Triplet-loss weighted matching | Implemented |
+| k-Reciprocal Re-ranking | matching.py | CVPR2017 Jaccard distance | Selective + cached k-NN |
+| FAISS Gallery Search | faiss-gallery-index-wrapper.py | O(log n) similarity search | IVF indexing (optional) |
+| Motion Validation | matching.py | Temporal consistency checking | Implemented |
+| Quality Weighting | matching.py | Confidence + geometry fusion | Implemented |
+| Crossing Detection | matching.py | Prevent ID theft at crossings | Implemented |
+| Adaptive Threshold | matching.py | Dynamic similarity adjustment | Implemented |
+| torch.compile | utils.py | Model graph compilation | FP16 + inference_mode |
+| Batch Processing | feature_extractor.py | Vectorized extraction | Pinned memory + pre-alloc tensors |
 
-## 12. Dependencies Map
+## 13. Dependencies Map
 
 ```
-VideoReIDPipeline
-├── JointBDOEDetector
+VideoReIDPipeline (torch.compile optimized)
+├── JointBDOEDetector (FP16 + inference_mode)
 │   └── detectors/jointbdoe/ (ported utilities)
 │   └── Pre-trained JointBDOE weights (data/weights/)
-├── ReIDFeatureExtractor
+├── ReIDFeatureExtractor (batch processing + pinned memory)
 │   └── models/osnet.py (ported from TorchReID)
 │   └── extractors/torchreid-feature-extractor.py
 ├── PersonGallery
 │   ├── matching module (all algorithms)
+│   ├── faiss-gallery-index-wrapper (optional: IVF acceleration)
+│   ├── gallery-knn-cache-for-selective-reranking (optional: confidence-triggered)
 │   └── lap (Hungarian algorithm)
 └── Visualization renderers
     └── colors.py (palette)
 ```
 
-**Note:** All external dependencies (TorchReID, JointBDOE) have been ported into
-the package for self-contained operation. Only model weights need to be downloaded.
+**Optional Dependencies (graceful fallback):**
+- `faiss-cpu` or `faiss-gpu`: Enable `gallery.use_faiss=true` for O(log n) search
+- Gracefully falls back to brute-force L2 distance if unavailable
 
-## 13. Configuration Parameter Reference
+## 14. Configuration Parameter Reference: Optimization Options
 
-See [system-architecture.md](./system-architecture.md) for complete parameter details.
+**Inference Optimizations:**
+
+| Parameter | Type | Default | Purpose |
+|-----------|------|---------|---------|
+| `inference.batch_size` | int | 32 | Feature extraction batch size |
+| Model device | str | cuda | GPU/CPU inference |
+
+**FAISS Acceleration:**
+
+| Parameter | Type | Default | Purpose |
+|-----------|------|---------|---------|
+| `gallery.use_faiss` | bool | true | Enable IVF indexing (O(log n)) |
+| `gallery.faiss_nlist` | int | 64 | Number of IVF clusters |
+| `gallery.faiss_nprobe` | int | 8 | Clusters to search per query |
+| `gallery.faiss_min_train_size` | int | 100 | Threshold for IVF activation |
+| `gallery.faiss_rebuild_interval` | int | 50 | Frame frequency for index rebuild |
+
+**Selective Re-ranking:**
+
+| Parameter | Type | Default | Purpose |
+|-----------|------|---------|---------|
+| `gallery.rerank_confidence_threshold` | float | 0.7 | Trigger re-ranking below this |
+| `gallery.rerank_distance_skip` | float | 0.5 | Skip if distance already low |
+| `gallery.rerank_cache_knn` | bool | true | Cache k-NN graph for speed |
+| `gallery.rerank_knn_rebuild_interval` | int | 100 | Cache rebuild frequency |
+
+See [system-architecture.md](./system-architecture.md) for complete architecture details.
 
 ---
 
-**Document Version:** 1.0
-**Last Updated:** 2025-02-03
-**Total Source LOC:** 3,444
+**Document Version:** 1.1
+**Last Updated:** 2025-02-10
+**Total Source LOC:** 3,625 (includes optimization modules)
+**Optimizations:** torch.compile, FP16, FAISS indexing, selective reranking, batch processing

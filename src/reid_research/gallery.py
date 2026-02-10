@@ -9,6 +9,23 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
 from .config import ReIDConfig
+
+# Optional FAISS integration (graceful fallback to brute-force)
+try:
+    from importlib import import_module as _im
+    _faiss_mod = _im(".faiss-gallery-index-wrapper", package="src.reid_research")
+    FAISSGalleryIndex = _faiss_mod.FAISSGalleryIndex
+    FAISS_AVAILABLE = _faiss_mod.FAISS_AVAILABLE
+except (ImportError, ModuleNotFoundError):
+    FAISS_AVAILABLE = False
+    FAISSGalleryIndex = None
+
+# k-NN cache for selective re-ranking
+try:
+    _knn_mod = _im(".gallery-knn-cache-for-selective-reranking", package="src.reid_research")
+    GalleryKNNCache = _knn_mod.GalleryKNNCache
+except (ImportError, ModuleNotFoundError):
+    GalleryKNNCache = None
 from .matching import (
     TrackMotion,
     apply_torchreid_reranking,
@@ -64,6 +81,26 @@ class PersonGallery:
         self._match_scores: deque = deque(maxlen=config.gallery.adaptive_window_size)
         self._match_count: int = 0
         self._current_threshold: float = config.inference.similarity_threshold
+
+        # FAISS index for accelerated gallery search (optional)
+        self._faiss_index = None
+        if config.gallery.use_faiss and FAISS_AVAILABLE and FAISSGalleryIndex is not None:
+            self._faiss_index = FAISSGalleryIndex(
+                dimension=512,
+                nlist=config.gallery.faiss_nlist,
+                nprobe=config.gallery.faiss_nprobe,
+                use_gpu=config.model.device.startswith("cuda"),
+                min_train_size=config.gallery.faiss_min_train_size,
+            )
+        self._faiss_rebuild_counter = 0
+
+        # k-NN cache for selective re-ranking (Phase 5)
+        self._knn_cache = None
+        if config.gallery.rerank_cache_knn and GalleryKNNCache is not None:
+            self._knn_cache = GalleryKNNCache(k=config.gallery.rerank_k1)
+        self._knn_rebuild_counter = 0
+        self._rerank_trigger_count = 0
+        self._rerank_skip_count = 0
 
     def match_and_update(self, features: np.ndarray) -> int:
         """Match features against gallery, update/add entry.
@@ -127,32 +164,34 @@ class PersonGallery:
         # Detect crossing tracks for adaptive behavior
         crossing_ids = self._detect_crossing_tracks(bboxes, gallery_ids)
 
-        # Build cost matrix using rank-list euclidean distances
-        # Lower distance = lower cost = better match
+        # Build cost matrix using FAISS (fast) or brute-force rank-list
         n_queries = len(features_list)
         n_gallery = len(gallery_ids)
         cost_matrix = np.full((n_queries, n_gallery), 1e6, dtype=np.float32)
-        confidence_matrix = np.zeros((n_queries, n_gallery), dtype=np.float32)
 
-        for q_idx, query_feat in enumerate(features_list):
-            # Get full rank list for this query (all gallery entries)
-            rank_list = compute_euclidean_rank_list(
-                query_feat, gallery_features, k=min(n_gallery, 50)
-            )
+        if self._faiss_index is not None and self._faiss_index.size >= 10:
+            # FAISS-accelerated path: batch search all queries at once
+            queries = np.vstack(features_list).astype(np.float32)
+            k = min(50, self._faiss_index.size)
+            neighbors_batch = self._faiss_index.search_batch(queries, k=k)
 
-            # Populate cost matrix with distances
-            for track_id, dist, feat_count in rank_list:
-                if track_id in gallery_ids:
-                    g_idx = gallery_ids.index(track_id)
-                    cost_matrix[q_idx, g_idx] = dist
+            # Build id->gallery_idx lookup for fast cost matrix population
+            gid_to_idx = {gid: idx for idx, gid in enumerate(gallery_ids)}
 
-                    # Pre-compute confidence via majority vote per (query, gallery) pair
-                    # Use adaptive threshold (median of this query's distances)
-                    all_dists = [r[1] for r in rank_list]
-                    threshold = float(np.median(all_dists)) if all_dists else 1.0
-
-                    if dist < threshold:
-                        confidence_matrix[q_idx, g_idx] = 1.0 - (dist / (threshold + 1e-6))
+            for q_idx, neighbors in enumerate(neighbors_batch):
+                for track_id, dist in neighbors:
+                    if track_id in gid_to_idx:
+                        cost_matrix[q_idx, gid_to_idx[track_id]] = dist
+        else:
+            # Brute-force path: per-query euclidean rank-list
+            for q_idx, query_feat in enumerate(features_list):
+                rank_list = compute_euclidean_rank_list(
+                    query_feat, gallery_features, k=min(n_gallery, 50)
+                )
+                for track_id, dist, feat_count in rank_list:
+                    if track_id in gallery_ids:
+                        g_idx = gallery_ids.index(track_id)
+                        cost_matrix[q_idx, g_idx] = dist
 
         # Run Hungarian algorithm for optimal assignment
         _, row_to_col, _ = lap.lapjv(cost_matrix, extend_cost=True)
@@ -178,6 +217,12 @@ class PersonGallery:
                     best_conf = max(0.0, 1.0 - dist / fallback_thresh)
 
             results.append((best_id, float(best_conf)))
+
+        # Selective re-ranking: apply k-reciprocal only for ambiguous matches
+        if gallery_cfg.use_full_reranking and self._knn_cache is not None:
+            results = self._apply_selective_reranking(
+                results, features_list, gallery_features, gallery_ids, crossing_ids
+            )
 
         # Motion consistency validation - reject suspicious assignments
         if gallery_cfg.use_motion_validation and bboxes:
@@ -367,6 +412,108 @@ class PersonGallery:
             track_bboxes[tid] = (x1, y1, x2, y2)
 
         return track_bboxes
+
+    def _should_skip_reranking(self, match_id: int | None, confidence: float) -> bool:
+        """Determine if re-ranking can be skipped for this match.
+
+        Skips re-ranking for high-confidence matches or no-match cases.
+        Tracks trigger/skip counts for monitoring.
+        """
+        cfg = self.config.gallery
+
+        if match_id is None:
+            return True
+
+        if confidence >= cfg.rerank_confidence_threshold:
+            self._rerank_skip_count += 1
+            return True
+
+        # Very close match — no ambiguity
+        distance = 1.0 - confidence
+        if distance < cfg.rerank_distance_skip:
+            self._rerank_skip_count += 1
+            return True
+
+        self._rerank_trigger_count += 1
+        return False
+
+    def _apply_selective_reranking(
+        self,
+        results: list[tuple[int | None, float]],
+        features_list: list[np.ndarray],
+        gallery_features: dict[int, list[np.ndarray]],
+        gallery_ids: list[int],
+        crossing_ids: set[int],
+    ) -> list[tuple[int | None, float]]:
+        """Apply k-reciprocal re-ranking only for ambiguous matches.
+
+        High-confidence matches skip re-ranking entirely. Crossing tracks
+        always trigger re-ranking regardless of confidence.
+
+        Args:
+            results: Initial (match_id, confidence) from Hungarian assignment
+            features_list: Query feature vectors
+            gallery_features: Gallery features dict
+            gallery_ids: Ordered gallery IDs
+            crossing_ids: Track IDs currently in crossing state
+
+        Returns:
+            Re-ranked results list
+        """
+        final_results = []
+        for q_idx, (match_id, confidence) in enumerate(results):
+            # Always re-rank crossing tracks (high ID-theft risk)
+            is_crossing = match_id is not None and match_id in crossing_ids
+
+            if not is_crossing and self._should_skip_reranking(match_id, confidence):
+                final_results.append((match_id, confidence))
+                continue
+
+            # Apply re-ranking using cached k-NN reciprocal set
+            if match_id is not None and self._knn_cache is not None:
+                reciprocal_set = self._knn_cache.get_reciprocal_set(match_id)
+                if reciprocal_set:
+                    # Boost confidence if matched ID has strong reciprocal neighbors
+                    # that also appear close to the query
+                    query_feat = features_list[q_idx]
+                    reciprocal_support = 0
+                    for r_id in reciprocal_set:
+                        if r_id in gallery_features:
+                            # Check if reciprocal neighbor is also close to query
+                            r_feats = gallery_features[r_id]
+                            for rf in r_feats:
+                                dist = float(np.linalg.norm(query_feat - rf))
+                                if dist < self.config.gallery.rank_fallback_threshold:
+                                    reciprocal_support += 1
+                                    break
+
+                    # If reciprocal neighbors don't support the match, reduce confidence
+                    if len(reciprocal_set) > 0 and reciprocal_support == 0:
+                        confidence *= 0.5  # Penalize unsupported match
+
+            final_results.append((match_id, confidence))
+
+        return final_results
+
+    def _rebuild_knn_cache(self) -> None:
+        """Rebuild k-NN cache from current gallery features."""
+        if self._knn_cache is None:
+            return
+        gallery_features = {
+            tid: entry.avg_feature
+            for tid, entry in self._gallery.items()
+            if entry.avg_feature is not None
+        }
+        self._knn_cache.update(gallery_features)
+
+    def get_rerank_stats(self) -> dict:
+        """Get selective re-ranking trigger statistics."""
+        total = self._rerank_trigger_count + self._rerank_skip_count
+        return {
+            "trigger_count": self._rerank_trigger_count,
+            "skip_count": self._rerank_skip_count,
+            "trigger_rate": self._rerank_trigger_count / max(1, total),
+        }
 
     def _update_track_motion(
         self,
@@ -617,6 +764,10 @@ class PersonGallery:
         )
         self._gallery[track_id] = entry
 
+        # Maintain FAISS index
+        if self._faiss_index is not None:
+            self._faiss_index.add(track_id, features)
+
         # Initialize motion tracking
         if bbox is not None and cfg.use_velocity_prediction:
             self._update_track_motion(track_id, bbox)
@@ -677,6 +828,10 @@ class PersonGallery:
         if entry.quality_scores:
             entry.avg_quality = sum(entry.quality_scores) / len(entry.quality_scores)
 
+        # Sync FAISS index with updated average feature
+        if self._faiss_index is not None and entry.avg_feature is not None:
+            self._faiss_index.update(track_id, entry.avg_feature)
+
         # Update motion tracking
         if bbox is not None and cfg.use_velocity_prediction:
             self._update_track_motion(track_id, bbox)
@@ -684,6 +839,20 @@ class PersonGallery:
     def step_frame(self) -> None:
         """Increment frame counter (call once per frame)."""
         self._frame_idx += 1
+
+        # Periodic FAISS index rebuild for search accuracy
+        if self._faiss_index is not None:
+            self._faiss_rebuild_counter += 1
+            if self._faiss_rebuild_counter >= self.config.gallery.faiss_rebuild_interval:
+                self._faiss_index._needs_rebuild = True
+                self._faiss_rebuild_counter = 0
+
+        # Periodic k-NN cache rebuild for selective re-ranking
+        if self._knn_cache is not None:
+            self._knn_rebuild_counter += 1
+            if self._knn_rebuild_counter >= self.config.gallery.rerank_knn_rebuild_interval:
+                self._rebuild_knn_cache()
+                self._knn_rebuild_counter = 0
 
     def get_all_ids(self) -> list[int]:
         """Get all track IDs in gallery."""
@@ -720,6 +889,9 @@ class PersonGallery:
         self._frame_idx = 0
         self._track_motion.clear()
         self.reset_threshold_stats()
+        if self._faiss_index is not None:
+            self._faiss_index.clear()
+        self._faiss_rebuild_counter = 0
 
     def get_effective_threshold(self) -> float:
         """Get current effective similarity threshold.
@@ -798,6 +970,9 @@ class PersonGallery:
                 del self._gallery[track_id]
                 # Also remove motion tracking data
                 self._track_motion.pop(track_id, None)
+                # Remove from FAISS index
+                if self._faiss_index is not None:
+                    self._faiss_index.remove(track_id)
                 pruned.append(track_id)
 
         return pruned
