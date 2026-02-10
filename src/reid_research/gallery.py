@@ -1,5 +1,6 @@
 """Gallery-based person tracking with ReID features."""
 import json
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,6 +10,8 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
 from .config import ReIDConfig
+
+logger = logging.getLogger(__name__)
 
 # Optional FAISS integration (graceful fallback to brute-force)
 try:
@@ -99,6 +102,7 @@ class PersonGallery:
         if config.gallery.rerank_cache_knn and GalleryKNNCache is not None:
             self._knn_cache = GalleryKNNCache(k=config.gallery.rerank_k1)
         self._knn_rebuild_counter = 0
+        self._knn_change_counter = 0  # Track gallery modifications for eager rebuild
         self._rerank_trigger_count = 0
         self._rerank_skip_count = 0
 
@@ -184,13 +188,16 @@ class PersonGallery:
                         cost_matrix[q_idx, gid_to_idx[track_id]] = dist
         else:
             # Brute-force path: per-query euclidean rank-list
+            # Build id->idx lookup to avoid O(n) list.index() in inner loop
+            gid_to_idx = {gid: idx for idx, gid in enumerate(gallery_ids)}
+
             for q_idx, query_feat in enumerate(features_list):
                 rank_list = compute_euclidean_rank_list(
                     query_feat, gallery_features, k=min(n_gallery, 50)
                 )
                 for track_id, dist, feat_count in rank_list:
-                    if track_id in gallery_ids:
-                        g_idx = gallery_ids.index(track_id)
+                    if track_id in gid_to_idx:
+                        g_idx = gid_to_idx[track_id]
                         cost_matrix[q_idx, g_idx] = dist
 
         # Run Hungarian algorithm for optimal assignment
@@ -319,9 +326,11 @@ class PersonGallery:
         """
         predictions = {}
         max_age = self.config.gallery.velocity_history_frames
+        stale_ids = []  # Collect stale motion entries for cleanup
 
         for track_id, motion in self._track_motion.items():
             if self._frame_idx - motion.last_frame > max_age:
+                stale_ids.append(track_id)
                 continue
 
             if not motion.positions:
@@ -332,6 +341,10 @@ class PersonGallery:
 
             pred_pos = predict_position(last_pos, motion.velocity, frames_elapsed)
             predictions[track_id] = pred_pos
+
+        # Clean up stale motion entries
+        for track_id in stale_ids:
+            del self._track_motion[track_id]
 
         return predictions
 
@@ -768,6 +781,10 @@ class PersonGallery:
         if self._faiss_index is not None:
             self._faiss_index.add(track_id, features)
 
+        # Track change for k-NN cache eager rebuild
+        if self._knn_cache is not None:
+            self._knn_change_counter += 1
+
         # Initialize motion tracking
         if bbox is not None and cfg.use_velocity_prediction:
             self._update_track_motion(track_id, bbox)
@@ -821,6 +838,10 @@ class PersonGallery:
             entry.avg_feature = (
                 effective_alpha * features + (1 - effective_alpha) * entry.avg_feature
             )
+            # Re-normalize to prevent drift from L2=1.0 over many updates
+            norm = np.linalg.norm(entry.avg_feature)
+            if norm > 1e-8:
+                entry.avg_feature /= norm
         else:
             entry.avg_feature = features.copy()
 
@@ -831,6 +852,10 @@ class PersonGallery:
         # Sync FAISS index with updated average feature
         if self._faiss_index is not None and entry.avg_feature is not None:
             self._faiss_index.update(track_id, entry.avg_feature)
+
+        # Track change for k-NN cache eager rebuild
+        if self._knn_cache is not None:
+            self._knn_change_counter += 1
 
         # Update motion tracking
         if bbox is not None and cfg.use_velocity_prediction:
@@ -850,9 +875,12 @@ class PersonGallery:
         # Periodic k-NN cache rebuild for selective re-ranking
         if self._knn_cache is not None:
             self._knn_rebuild_counter += 1
-            if self._knn_rebuild_counter >= self.config.gallery.rerank_knn_rebuild_interval:
+            # Eager rebuild if many changes accumulated, otherwise periodic rebuild
+            if (self._knn_change_counter >= 10 or
+                self._knn_rebuild_counter >= self.config.gallery.rerank_knn_rebuild_interval):
                 self._rebuild_knn_cache()
                 self._knn_rebuild_counter = 0
+                self._knn_change_counter = 0
 
     def get_all_ids(self) -> list[int]:
         """Get all track IDs in gallery."""
@@ -866,10 +894,15 @@ class PersonGallery:
         """Get the most recent track ID seen near this position.
 
         Uses velocity-based motion tracking to find nearby active tracks.
+        Returns the CLOSEST track within radius, not the first match.
         """
         cx = (bbox[0] + bbox[2]) / 2
         cy = (bbox[1] + bbox[3]) / 2
         radius = self.config.gallery.prediction_radius
+
+        # Track the closest match within radius
+        closest_id = None
+        closest_dist = radius
 
         # Check motion history for recently seen tracks
         for track_id, motion in self._track_motion.items():
@@ -878,9 +911,10 @@ class PersonGallery:
             if motion.positions:
                 last_cx, last_cy = motion.positions[-1]
                 dist = ((cx - last_cx) ** 2 + (cy - last_cy) ** 2) ** 0.5
-                if dist < radius:
-                    return track_id
-        return None
+                if dist < closest_dist:
+                    closest_dist = dist
+                    closest_id = track_id
+        return closest_id
 
     def clear(self) -> None:
         """Clear all gallery entries and motion history."""
@@ -1000,6 +1034,15 @@ class PersonGallery:
         Args:
             path: Output JSON file path
         """
+        # Create backup of existing file before overwriting
+        path_obj = Path(path)
+        if path_obj.exists():
+            backup_path = Path(str(path) + ".bak")
+            try:
+                path_obj.rename(backup_path)
+            except Exception as e:
+                logger.warning(f"Failed to create backup of {path}: {e}")
+
         data = {
             "next_id": self._next_id,
             "frame_idx": self._frame_idx,
@@ -1013,27 +1056,65 @@ class PersonGallery:
                 for tid, entry in self._gallery.items()
             },
         }
-        Path(path).write_text(json.dumps(data, indent=2))
+        path_obj.write_text(json.dumps(data, indent=2))
 
     def load(self, path: str | Path) -> None:
-        """Load gallery from JSON file.
+        """Load gallery from JSON file with validation.
 
         Args:
             path: Input JSON file path
         """
-        data = json.loads(Path(path).read_text())
-        self._next_id = data["next_id"]
-        self._frame_idx = data["frame_idx"]
-        self._gallery.clear()
+        try:
+            data = json.loads(Path(path).read_text())
 
-        for tid_str, entry_data in data["entries"].items():
-            tid = int(tid_str)
-            avg_feat = (
-                np.array(entry_data["avg_feature"])
-                if entry_data["avg_feature"]
-                else None
-            )
-            self._gallery[tid] = GalleryEntry(
-                avg_feature=avg_feat,
-                last_seen=entry_data["last_seen"],
-            )
+            # Validate top-level structure
+            if not isinstance(data.get("next_id"), int):
+                raise ValueError("Invalid or missing 'next_id' field")
+            if not isinstance(data.get("frame_idx"), int):
+                raise ValueError("Invalid or missing 'frame_idx' field")
+            if not isinstance(data.get("entries"), dict):
+                raise ValueError("Invalid or missing 'entries' field")
+
+            self._next_id = data["next_id"]
+            self._frame_idx = data["frame_idx"]
+            self._gallery.clear()
+
+            # Load entries with validation
+            for tid_str, entry_data in data["entries"].items():
+                try:
+                    tid = int(tid_str)
+
+                    # Validate entry structure
+                    if not isinstance(entry_data, dict):
+                        logger.warning(f"Skipping entry {tid_str}: invalid entry structure")
+                        continue
+
+                    # Validate and load avg_feature
+                    avg_feat = None
+                    if entry_data.get("avg_feature") is not None:
+                        feat_list = entry_data["avg_feature"]
+                        if not isinstance(feat_list, list):
+                            logger.warning(f"Skipping entry {tid}: avg_feature not a list")
+                            continue
+                        if len(feat_list) != 512:
+                            logger.warning(f"Skipping entry {tid}: avg_feature wrong length ({len(feat_list)}, expected 512)")
+                            continue
+                        avg_feat = np.array(feat_list)
+
+                    # Validate last_seen
+                    if not isinstance(entry_data.get("last_seen"), int):
+                        logger.warning(f"Skipping entry {tid}: invalid last_seen")
+                        continue
+
+                    self._gallery[tid] = GalleryEntry(
+                        avg_feature=avg_feat,
+                        last_seen=entry_data["last_seen"],
+                    )
+
+                except (KeyError, ValueError, TypeError) as e:
+                    logger.warning(f"Skipping entry {tid_str}: {e}")
+                    continue
+
+        except (KeyError, ValueError, TypeError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to load gallery from {path}: {e}")
+            raise

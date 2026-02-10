@@ -44,6 +44,10 @@ class FAISSGalleryIndex:
         self._id_map: list[int] = []  # FAISS internal idx -> track_id
         self._features: list[np.ndarray] = []  # Raw features for retraining
         self._needs_rebuild = True
+        # Reusable GPU resources to prevent memory leaks on index rebuild
+        self._gpu_resources = None
+        if self.use_gpu:
+            self._gpu_resources = faiss.StandardGpuResources()
 
     def add(self, track_id: int, feature: np.ndarray) -> None:
         """Add feature to index (deferred rebuild until next search)."""
@@ -142,10 +146,9 @@ class FAISSGalleryIndex:
 
         self._index.add(features)
 
-        # Move to GPU if available
-        if self.use_gpu:
-            res = faiss.StandardGpuResources()
-            self._index = faiss.index_cpu_to_gpu(res, 0, self._index)
+        # Move to GPU if available (reuse GPU resources to prevent memory leaks)
+        if self.use_gpu and self._gpu_resources is not None:
+            self._index = faiss.index_cpu_to_gpu(self._gpu_resources, 0, self._index)
 
         self._needs_rebuild = False
 

@@ -143,6 +143,8 @@ class DebugConfig(BaseModel):
 class ReIDConfig(BaseModel):
     """Root configuration model."""
 
+    model_config = {"extra": "forbid"}  # Reject unknown config keys (catch typos)
+
     model: ModelConfig = Field(default_factory=ModelConfig)
     inference: InferenceConfig = Field(default_factory=InferenceConfig)
     gallery: GalleryConfig = Field(default_factory=GalleryConfig)

@@ -1,6 +1,9 @@
 """Shared utilities for ReID research module."""
+import logging
 import numpy as np
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 def safe_compile(model: torch.nn.Module, **kwargs) -> torch.nn.Module:
@@ -41,6 +44,11 @@ def extract_crop(frame: np.ndarray, bbox: tuple, padding: int = 10) -> np.ndarra
     y1 = max(0, y1 - padding)
     x2 = min(w, x2 + padding)
     y2 = min(h, y2 + padding)
+
+    # Validate crop dimensions after bounds checking
+    if x2 <= x1 or y2 <= y1:
+        logger.debug(f"Degenerate bbox after clamping: ({x1},{y1},{x2},{y2}), returning fallback")
+        return np.zeros((1, 1, 3), dtype=frame.dtype)  # 1x1 black pixel fallback
 
     return frame[y1:y2, x1:x2]
 

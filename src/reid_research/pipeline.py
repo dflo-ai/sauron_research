@@ -112,6 +112,11 @@ class VideoReIDPipeline:
         for det, feat in zip(detections, features):
             det.features = feat
 
+        # Fix #8: Filter out detections with None features
+        detections = [det for det in detections if det.features is not None]
+        if not detections:
+            return []
+
         # Stage 2: IoU-based track continuation + ReID matching
         self._current_stage = 2
         features_list = [det.features for det in detections]
@@ -162,9 +167,15 @@ class VideoReIDPipeline:
         matched_ids = [r[0] for r in results]
         similarities = [r[1] for r in results]
 
-        # Override with IoU matches where applicable (permanent tracks only)
+        # Fix #19: Prefer high-confidence IoU over weak ReID matches
         for det_idx, tid in iou_matched.items():
-            if matched_ids[det_idx] is None:
+            best_iou = 0.0
+            for t_id, (prev_bbox, last_frame) in self._track_bboxes.items():
+                if t_id == tid and current_frame - last_frame <= 5:
+                    best_iou = self._compute_iou(bboxes[det_idx], prev_bbox)
+                    break
+            # If IoU confidence >= 0.5, prefer IoU over ReID
+            if best_iou >= 0.5 or matched_ids[det_idx] is None:
                 matched_ids[det_idx] = tid
                 similarities[det_idx] = 0.9  # High confidence for IoU match
 
@@ -250,6 +261,15 @@ class VideoReIDPipeline:
                     if len(self._recent_matches) > 20:
                         self._recent_matches.pop(0)
                     self._track_bboxes[det.track_id] = (det.bbox, frame_idx)
+
+                    # Fix #20: Update gallery with averaged feature from accumulated crops
+                    if len(track_data["crops"]) > 0:
+                        crop_features = self.extractor.extract(track_data["crops"][-5:])
+                        valid_features = [f for f in crop_features if f is not None]
+                        if valid_features:
+                            avg_feature = np.mean(valid_features, axis=0)
+                            self.gallery.update(det.track_id, avg_feature, quality_score=q_score, bbox=det.bbox)
+
                     # Remove from tentative
                     del self._tentative_tracks[tent_id]
                 else:
@@ -272,13 +292,19 @@ class VideoReIDPipeline:
                 det.track_id = tent_id  # Negative ID indicates tentative
                 det.is_matched = False
 
-        # Prune stale tentative tracks (not seen for >tentative_max_age frames)
+        # Fix #24: Use >= for exact semantics (max_age frames alive, not max_age+1)
         stale_tentative = [
             tid for tid, data in self._tentative_tracks.items()
-            if current_frame - data["last_frame"] > self._tentative_max_age
+            if current_frame - data["last_frame"] >= self._tentative_max_age
         ]
         for tid in stale_tentative:
             del self._tentative_tracks[tid]
+
+        # Fix #13: Move animation cleanup to end of process_frame (not just visualize path)
+        for tid in list(self._match_animations.keys()):
+            self._match_animations[tid] += 1
+            if self._match_animations[tid] > self.fps * self.REMATCH_DISPLAY_SECONDS:
+                del self._match_animations[tid]
 
         return detections
 
@@ -297,7 +323,11 @@ class VideoReIDPipeline:
             return 0.0
         area1 = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1])
         area2 = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1])
-        return inter / (area1 + area2 - inter)
+        union = area1 + area2 - inter
+        # Fix #1: Guard against div-by-zero on degenerate bboxes
+        if union <= 1e-8:
+            return 0.0
+        return inter / union
 
     def _draw_dashed_rect(
         self,
@@ -399,6 +429,21 @@ class VideoReIDPipeline:
             else:
                 writer = cv2.VideoWriter(str(output_path), fourcc, self.fps, (width, height))
 
+            # Fix #32: Validate writer opened successfully, try fallback codecs
+            if not writer.isOpened():
+                fallback_codecs = ['XVID', 'MJPG']
+                for codec in fallback_codecs:
+                    fourcc = cv2.VideoWriter_fourcc(*codec)
+                    if self.config.visualization.extended_frame_enabled:
+                        writer = cv2.VideoWriter(str(output_path), fourcc, self.fps, (ext_w, ext_h))
+                    else:
+                        writer = cv2.VideoWriter(str(output_path), fourcc, self.fps, (width, height))
+                    if writer.isOpened():
+                        break
+                if not writer.isOpened():
+                    print(f"Warning: Failed to open VideoWriter with all codecs. Video will not be saved.")
+                    writer = None
+
         # Processing loop with progress bar
         stats = {"frames": 0, "detections": 0, "unique_ids": set(), "reid_matches": 0}
 
@@ -407,6 +452,9 @@ class VideoReIDPipeline:
             ret, frame = cap.read()
             if not ret or (max_frames is not None and stats["frames"] >= max_frames):
                 break
+
+            # Fix #18: Step frame counter BEFORE process_frame for consistent indexing
+            self.gallery.step_frame()
 
             detections = self.process_frame(frame)
             stats["frames"] += 1
@@ -454,12 +502,27 @@ class VideoReIDPipeline:
                         )
                 writer.write(vis_frame)
 
-            # Step gallery frame counter
-            self.gallery.step_frame()
-
             # Prune stale entries periodically
             if stats["frames"] % 300 == 0:
+                current_frame = self.gallery._frame_idx
                 self.gallery.prune_stale(max_age=300)
+
+                # Fix #14: Prune stale _track_bboxes
+                stale_tracks = [
+                    tid for tid, (_, last_frame) in self._track_bboxes.items()
+                    if current_frame - last_frame > 300
+                ]
+                for tid in stale_tracks:
+                    del self._track_bboxes[tid]
+
+                # Fix #15: Prune stale _thumbnail_cache
+                active_gallery_ids = set(self.gallery.get_all_ids())
+                stale_thumbs = [
+                    tid for tid in self._thumbnail_cache.keys()
+                    if tid not in active_gallery_ids
+                ]
+                for tid in stale_thumbs:
+                    del self._thumbnail_cache[tid]
 
             # Update progress bar with ReID stats
             pbar.set_postfix({
@@ -570,15 +633,6 @@ class VideoReIDPipeline:
                     cv2.rectangle(vis, (x1, y_offset - sh - 2), (x1 + sw + 6, y_offset + 2), (40, 40, 40), -1)
                     cv2.putText(vis, sim_label, (x1 + 3, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 255), 1)
                     y_offset += sh + 6
-
-
-        # Step animation counters
-        for tid in list(self._match_animations.keys()):
-            self._match_animations[tid] += 1
-            # Cleanup old animations
-            # Keep animation state for rematch display duration
-            if self._match_animations[tid] > self.fps * self.REMATCH_DISPLAY_SECONDS:
-                del self._match_animations[tid]
 
         # Draw gallery panel if enabled (only for non-extended mode)
         if self.config.visualization.show_gallery_panel and not self.config.visualization.extended_frame_enabled:

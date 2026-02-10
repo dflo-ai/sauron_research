@@ -70,7 +70,9 @@ def re_ranking_torchreid(
         axis=0,
     )
     original_dist = np.power(original_dist, 2).astype(np.float32)
-    original_dist = np.transpose(1.0 * original_dist / np.max(original_dist, axis=0))
+    col_max = np.max(original_dist, axis=0)
+    col_max = np.maximum(col_max, 1e-8)  # Prevent NaN when features are identical
+    original_dist = np.transpose(1.0 * original_dist / col_max)
 
     V = np.zeros_like(original_dist).astype(np.float32)
     initial_rank = np.argsort(original_dist).astype(np.int32)
@@ -440,6 +442,11 @@ def compute_quality_score(
     # Geometry component
     w = bbox[2] - bbox[0]
     h = bbox[3] - bbox[1]
+
+    # Reject degenerate bboxes explicitly
+    if w <= 0 or h <= 0:
+        return 0.0
+
     area = w * h
 
     # Area score (saturates at min_bbox_area)
@@ -931,8 +938,8 @@ def majority_vote_reidentify(
     if not candidates:
         return (None, 0.0)
 
-    # Select best candidate: most matches, then highest confidence
-    best = max(candidates, key=lambda x: (x[2], x[1]))
+    # Select best candidate: most matches, then highest confidence, then smaller track_id for determinism
+    best = max(candidates, key=lambda x: (x[2], x[1], -x[0]))
     return (best[0], best[1])
 
 

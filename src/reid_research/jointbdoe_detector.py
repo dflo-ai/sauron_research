@@ -7,9 +7,10 @@ import numpy as np
 import torch
 
 # Add JointBDOE models/utils to path BEFORE importing (required for torch.load unpickling)
+# Use append() to avoid shadowing stdlib modules
 _JOINTBDOE_PATH = Path(__file__).parent / "detectors" / "jointbdoe"
 if str(_JOINTBDOE_PATH) not in sys.path:
-    sys.path.insert(0, str(_JOINTBDOE_PATH))
+    sys.path.append(str(_JOINTBDOE_PATH))
 
 from .config import ReIDConfig
 from .detectors.jointbdoe import (
@@ -37,7 +38,7 @@ class Detection:
     previous_id_timestamp: int | None = None  # Last seen frame of previous ID
     match_similarity: float = 0.0  # Similarity score of the ReID match
     is_recovery: bool = False  # True if ReID match occurs after spatial track loss
-    top_similar: list = None  # Top 3 similar IDs: [(id, similarity), ...]
+    top_similar: list | None = None  # Top 3 similar IDs: [(id, similarity), ...]
 
 
 class JointBDOEDetector:
