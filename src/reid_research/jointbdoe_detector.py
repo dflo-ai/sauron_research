@@ -19,7 +19,7 @@ from .detectors.jointbdoe import (
     non_max_suppression,
     scale_coords,
 )
-from .utils import extract_crop, safe_compile
+from .utils import extract_crop
 
 
 @dataclass
@@ -71,14 +71,9 @@ class JointBDOEDetector:
         self._stride = int(self._model.stride.max())
         self._imgsz = check_img_size(self._imgsz, s=self._stride)
 
-        # Apply torch.compile for inference optimization
-        self._model = safe_compile(
-            self._model,
-            mode="reduce-overhead",
-            fullgraph=False,
-        )
-
-        # Warmup (triggers torch.compile graph capture)
+        # Note: torch.compile skipped for detector — JointBDOE has dynamic
+        # tensor shapes across layers, causing excessive recompilation.
+        # Warmup forward pass for CUDA kernel init
         if self._device.type != "cpu":
             with torch.inference_mode():
                 self._model(
@@ -126,7 +121,8 @@ class JointBDOEDetector:
 
         # Scale boxes to original frame size
         # Output format: x1, y1, x2, y2, conf, class, orientation
-        boxes = scale_coords(img.shape[2:], out[0][:, :4], frame.shape[:2])
+        # Clone to allow in-place ops in scale_coords (inference tensors are immutable)
+        boxes = scale_coords(img.shape[2:], out[0][:, :4].clone(), frame.shape[:2])
         boxes = boxes.cpu().numpy()
         confs = out[0][:, 4].cpu().numpy()
         orientations = out[0][:, 6:].cpu().numpy() * 360  # (0,1) -> (0,360)
