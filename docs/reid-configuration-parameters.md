@@ -1,6 +1,6 @@
 # ReID Configuration Parameters Reference
 
-Comprehensive documentation for 46 pipeline parameters across 5 config classes.
+Comprehensive documentation for 46 pipeline parameters across 5 config classes. **NOTE:** Config validation now enforces extra="forbid" (rejects unknown YAML keys).
 
 ## Overview
 
@@ -920,6 +920,7 @@ visualization:
 
 ---
 
-**Document Version:** 1.0
-**Last Updated:** 2026-02-04
+**Document Version:** 1.1
+**Last Updated:** 2026-02-10
 **Parameter Count:** 46
+**Validation:** extra="forbid" active (unknown YAML keys rejected)

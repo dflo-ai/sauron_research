@@ -37,11 +37,11 @@ src/reid_research/
     └── extended_frame_renderer.py  # Analytics layout
 ```
 
-## 1. Core Pipeline: `pipeline.py` (830 LOC)
+## 1. Core Pipeline: `pipeline.py` (825 LOC)
 
 **Class:** `VideoReIDPipeline`
 
-Main orchestrator for end-to-end video processing.
+Main orchestrator for end-to-end video processing. Hardened with 25 edge case fixes including IoU div-by-zero guard, off-by-one correction for frame counter, IoU match preference over weak ReID, periodic stale entry cleanup.
 
 ### Key Methods
 
@@ -112,11 +112,11 @@ config.gallery.min_frames_for_id   # Frames before permanent ID
 config.visualization.*             # Rendering options
 ```
 
-## 2. Gallery & Assignment: `gallery.py` (904 LOC)
+## 2. Gallery & Assignment: `gallery.py` (1120 LOC)
 
 **Classes:** `PersonGallery`, `GalleryEntry`
 
-Manages person tracks and implements Hungarian assignment.
+Manages person tracks and implements Hungarian assignment. Robust edge case handling: schema validation on load, backups before save, EMA re-normalization post-update, k-NN cache eager rebuild on gallery changes (10+ changes), O(1) dict lookups replacing O(n) list.index(), stale motion entry cleanup.
 
 ### GalleryEntry (Track Data)
 
@@ -172,11 +172,11 @@ gallery:
   tentative_max_age: 10             # Frames to keep unconfirmed
 ```
 
-## 3. Matching & Re-ranking: `matching.py` (1,009 LOC)
+## 3. Matching & Re-ranking: `matching.py` (1016 LOC)
 
 **Key Functions:** All module-level (no classes)
 
-Implements feature matching, re-ranking, and validation algorithms.
+Implements feature matching, re-ranking, and validation algorithms. NaN prevention: col_max clamped to 1e-8 in re_ranking, degenerate bbox rejection (w<=0 or h<=0) in quality scoring, deterministic tie-breaking in majority voting.
 
 ### Section 1: Official CVPR2017 Re-ranking
 
@@ -404,7 +404,7 @@ def get_id_color(track_id):
     """Returns RGB color for track ID (cyclic)"""
 ```
 
-## 8. Utilities: `utils.py` (79 LOC)
+## 8. Utilities: `utils.py` (87 LOC)
 
 ```python
 def safe_compile(model: torch.nn.Module, **kwargs) -> torch.nn.Module:
@@ -414,15 +414,15 @@ def safe_compile(model: torch.nn.Module, **kwargs) -> torch.nn.Module:
     """
 
 def compute_iou(box1, box2) -> float:
-    """Jaccard intersection over union"""
+    """Jaccard intersection over union. Guard: returns 0.0 if union <= 1e-8"""
 
 def extract_crop(frame, bbox, padding=10) -> np.ndarray:
-    """Extract person crop from frame with optional padding"""
+    """Extract person crop with validation. Returns 1x1 fallback for degenerate bbox"""
 ```
 
 ## 9. Optimization Modules
 
-### FAISS Gallery Index: `faiss-gallery-index-wrapper.py` (5.6KB)
+### FAISS Gallery Index: `faiss-gallery-index-wrapper.py` (165 LOC)
 
 Optional module for accelerated gallery search using FAISS (Facebook AI Similarity Search).
 
@@ -433,6 +433,7 @@ class FAISSGalleryIndexWrapper:
     - IVF clustering for large galleries (>100 tracks)
     - Graceful fallback to brute-force L2 distance if FAISS unavailable
     - Configurable: nlist (clusters), nprobe (search width)
+    - GPU resource pooling: StandardGpuResources() stored as instance var, reused on rebuild (prevents leaks)
     - Rebuild interval to maintain index freshness
     """
 
@@ -643,7 +644,8 @@ See [system-architecture.md](./system-architecture.md) for complete architecture
 
 ---
 
-**Document Version:** 1.1
-**Last Updated:** 2025-02-10
-**Total Source LOC:** 3,625 (includes optimization modules)
+**Document Version:** 1.2
+**Last Updated:** 2026-02-10
+**Total Source LOC:** 3,700+ (edge case hardening added 205 LOC, net +49 after deletions)
 **Optimizations:** torch.compile, FP16, FAISS indexing, selective reranking, batch processing
+**Robustness:** 25 edge case fixes: IoU guards, NaN prevention, degenerate bbox handling, GPU resource pooling, stale entry cleanup, O(1) lookups, deterministic tie-breaking

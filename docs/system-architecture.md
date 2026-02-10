@@ -64,7 +64,7 @@
 | **5. Motion Valid.** | Assignments, track history | Validated assignments | Same as before | — |
 | **6. Gallery Update** | Detections+track_id, features | GalleryEntry state | EMA + motion tracking | — |
 
-### Stage 1: Detection (JointBDOE)
+### Stage 1: Detection (JointBDOE) - Robustness Hardened
 
 **Input:** `np.ndarray (H, W, 3) BGR`
 
@@ -74,7 +74,7 @@
 - `crop: np.ndarray (H', W', 3) BGR` - 10px padded region
 - `orientation: float | None` - degrees (0-360)
 
-**Processing:** Letterbox→1024×1024, NMS conf=0.75, scale back, extract crops
+**Processing:** Letterbox→1024×1024, NMS conf=0.75, scale back, extract crops. **Hardening:** Video codec validation (isOpened check + fallback codecs [XVID, MJPG]), frame counter off-by-one fixed (step_frame before process_frame)
 
 ### Stage 2: Feature Extraction (OSNet x1.0) - Optimized
 
@@ -100,7 +100,7 @@ with torch.autocast(device_type="cuda", dtype=torch.float16):
 
 **Speedup:** 1.5-2× via batch processing + memory optimization
 
-### Stage 3: Accelerated Gallery Search (with optional FAISS)
+### Stage 3: Accelerated Gallery Search (with optional FAISS) - GPU Resource Pooling
 
 **Input:** Query features `(N, 512)`, Gallery features `(M, 512)`
 
@@ -114,6 +114,7 @@ if use_faiss and M > faiss_min_train_size:
     index.train(gallery_features)
     index.add(gallery_features)
     distances, indices = index.search(query_features, k=50)  # O(log 64)
+    # GPU resource pooling: StandardGpuResources() reused across rebuilds (prevents leaks)
 ```
 
 **Path B: Brute-force L2 (Fallback)**
@@ -123,9 +124,9 @@ distances = scipy.spatial.distance.cdist(queries, gallery, metric='euclidean')
 top_k_indices = np.argsort(distances, axis=1)[:, :k]
 ```
 
-**Speedup:** 10-50× for large galleries (M>1000) with FAISS
+**Speedup:** 10-50× for large galleries (M>1000) with FAISS. **Robustness:** GPU resource pooling prevents memory leaks on repeated rebuilds.
 
-### Stage 4: Hungarian Assignment + Rank-List Voting
+### Stage 4: Hungarian Assignment + Rank-List Voting - NaN Prevention & Degenerate Bbox Handling
 
 **Input:**
 - Gallery distances from Stage 3
@@ -136,9 +137,12 @@ top_k_indices = np.argsort(distances, axis=1)[:, :k]
 
 **Algorithm:**
 1. Use top-k distances from gallery search
-2. Majority vote filtering: distance < 1.2
-3. Hungarian optimal assignment via `lap.lapjv()`
-4. Confidence = 1.0 - (distance / 1.2)
+2. Majority vote filtering: distance < 1.2 (deterministic tie-breaking: prefer smaller track_id)
+3. Degenerate bbox rejection: skip if w<=0 or h<=0
+4. Hungarian optimal assignment via `lap.lapjv()`
+5. Confidence = 1.0 - (distance / 1.2), NaN clamped to 1e-8 (prevents col_max collapse)
+
+**Robustness:** NaN prevention via col_max clamp, explicit degenerate bbox rejection, deterministic tie-breaking
 
 ### Stage 5: Selective Confidence-Triggered Re-ranking (Optional)
 
@@ -209,11 +213,14 @@ if frame_count % rerank_knn_rebuild_interval == 0:
 - Updated `GalleryEntry` per ID
 - Rendered frame with annotations
 
-**Gallery Update (EMA):**
+**Gallery Update (EMA) - Feature Normalization & Stale Entry Cleanup:**
 - Quality: `(confidence × 0.6) + (geometry × 0.4)`
 - Skip if quality < 0.3
 - Feature deque: maxlen=10, avg_feature = α × qual × feat + (1−α) × old_avg
+- EMA re-normalized after update to prevent drift
 - Motion: push center position, compute velocity, store direction angle
+- Stale motion entries cleaned up after 300 frames
+- _thumbnail_cache pruned for stale track IDs
 
 **Visualization:** Extended frame + gallery panel (200px) + HUD
 
@@ -663,7 +670,7 @@ VideoReIDPipeline
 
 ---
 
-## Appendix: Optimization Summary
+## Appendix: Optimization Summary & Robustness Hardening
 
 **Applied Optimizations:**
 1. **torch.compile + FP16 + inference_mode** in detector: 2.5-3× speedup
@@ -672,9 +679,36 @@ VideoReIDPipeline
 4. **Selective k-reciprocal re-ranking** with confidence triggering: 5× speedup
 5. **k-NN cache invalidation** strategy: 20-30× faster re-ranking
 
+**Robustness Hardening (25 edge case fixes):**
+1. **IoU div-by-zero guard:** union <= 1e-8 → return 0.0
+2. **NaN prevention:** col_max clamped to 1e-8 in re-ranking
+3. **Degenerate bbox rejection:** w<=0 or h<=0 explicitly rejected in quality scoring
+4. **GPU resource pooling:** StandardGpuResources reused on FAISS rebuild (no leaks)
+5. **EMA re-normalization:** L2 norm restored after feature update (drift prevention)
+6. **Stale entry cleanup:** Motion tracking and thumbnail cache pruned every 300 frames
+7. **O(1) lookups:** dict replaced list.index() in brute-force matching path
+8. **Frame counter fix:** off-by-one corrected (step_frame before process_frame)
+9. **Video codec validation:** isOpened check + fallback codecs [XVID, MJPG]
+10. **IoU match preference:** IoU confidence >= 0.5 preferred over weak ReID
+11. **Deterministic tie-breaking:** smaller track_id in majority_vote (no ties)
+12. **Extract crop validation:** 1x1 fallback for degenerate bboxes
+13. **Gallery validation:** schema/shape checked, bad entries skipped
+14. **Gallery backup:** .bak created before overwrite
+15. **k-NN eager rebuild:** after 10+ changes (was only periodic 100-frame timer)
+16. **Get recent closest:** gallery.get_recent_id returns closest (was first match)
+17. **Tentative feature averaging:** accumulated crops averaged before promotion
+18. **Tentative max_age fix:** >= instead of > for off-by-one consistency
+19. **Config validation:** extra="forbid" rejects unknown YAML keys
+20. **Type annotation:** top_similar: list | None = None (proper Optional)
+21. **sys.path handling:** append instead of insert(0) avoids stdlib shadowing
+22. **None features handling:** detections with None features filtered post-extraction
+23. **Match animations cleanup:** moved to process_frame (independent of viz)
+24. **_track_bboxes pruning:** alongside gallery.prune_stale() every 300 frames
+25. **IoU matches preferred:** when confidence >= 0.5 (over weak ReID)
+
 **Overall Performance Impact:** 2× speedup (34ms → 32-38ms per frame)
 
-**Memory Optimization:** Pre-allocated tensors, pinned memory transfers reduce allocation overhead
+**Memory Optimization:** Pre-allocated tensors, pinned memory transfers, GPU resource pooling
 
 **Graceful Fallbacks:**
 - FAISS unavailable → brute-force L2 distance (unchanged latency)
@@ -683,7 +717,7 @@ VideoReIDPipeline
 
 ---
 
-**Document Version:** 1.1
-**Last Updated:** 2025-02-10
-**Architecture Revision:** 1.1 (Optimization Pipeline Added)
-**Key Changes:** Added Stages 3-6 optimization flow, FAISS/selective reranking details, benchmarking latency comparisons
+**Document Version:** 1.2
+**Last Updated:** 2026-02-10
+**Architecture Revision:** 1.2 (Edge Case Hardening Complete)
+**Key Changes:** Added 25 robustness fixes (IoU guards, NaN prevention, GPU pooling, stale cleanup, deterministic tie-breaking, degenerate bbox handling)

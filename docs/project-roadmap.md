@@ -78,27 +78,34 @@ HAT-ReID is transitioning from Phase 2 (Advanced Matching) to Phase 3 (Optimizat
 
 ---
 
-## Phase 3: Optimization & Tuning (Q1-Q2 2025) 🔄 IN PROGRESS
+## Phase 3: Edge Case Hardening & Optimization (Q1-Q2 2025) ✓ PARTIALLY COMPLETE / 🔄 IN PROGRESS
 
-### Objectives
+### Completed (2026-02-10)
+- Edge case hardening: 25 fixes across pipeline (IoU guards, NaN prevention, GPU pooling, stale cleanup)
+- 88/88 tests passing post-fixes (comprehensive edge case coverage)
+- Feature normalization & deterministic tie-breaking implemented
+- Configuration validation (extra="forbid") active
+- All LOC counts updated (gallery 1120, pipeline 825, matching 1016)
+
+### Remaining Objectives
 - Create parameter tuning guides for different scenarios
 - Establish performance benchmarking suite
 - Conduct ablation studies on key algorithms
-- Improve test coverage to >80%
 - Complete documentation suite
 
 ### Planned Deliverables
 
 | Item | Status | Deadline | Purpose |
 |------|--------|----------|---------|
+| Edge case hardening | ✓ Complete | 2026-02-10 | 25 robustness fixes, 88/88 tests |
 | Parameter tuning guide | 🔄 In Progress | 2025-02-15 | Scene-specific optimization |
 | Benchmark suite | 🔄 In Progress | 2025-02-28 | Performance metrics |
 | Ablation studies | 🔄 In Progress | 2025-03-15 | Algorithm impact analysis |
 | Unit tests (>80%) | 🔄 In Progress | 2025-03-31 | Code coverage validation |
 | API documentation | ✓ Partially Done | 2025-02-10 | Full docstring coverage |
-| Architecture docs | ✓ Complete | 2025-02-03 | Data flows, components |
-| Code standards | ✓ Complete | 2025-02-03 | Conventions & guidelines |
-| Codebase summary | ✓ Complete | 2025-02-03 | Module reference |
+| Architecture docs | ✓ Complete | 2026-02-10 | Data flows + robustness patterns |
+| Code standards | ✓ Complete | 2026-02-10 | Edge case handling patterns added |
+| Codebase summary | ✓ Complete | 2026-02-10 | Module LOC updated + hardening notes |
 | Project overview | ✓ Complete | 2025-02-03 | Goals & PDR |
 | README | ✓ Complete | 2025-02-03 | Quickstart guide |
 
@@ -177,11 +184,13 @@ pytest tests/ --cov=src/reid_research --cov-report=html
 ```
 
 ### Success Criteria
+- [x] Edge case hardening: 25 fixes, 88/88 tests passing
+- [x] Gallery & pipeline robustness improved (stale cleanup, GPU pooling, deterministic tie-breaking)
 - [ ] Parameter tuning guide completed with 6+ scenarios
 - [ ] Benchmark suite runs and reports metrics
 - [ ] Ablation studies confirm algorithm contributions
 - [ ] Unit test coverage >80%
-- [ ] All documentation files under 800 LOC
+- [x] All documentation files under 800 LOC (after splits)
 - [ ] Code passes linting (black, isort, flake8)
 
 ### Timeline
@@ -439,6 +448,7 @@ pytest tests/ --cov=src/reid_research --cov-report=html
 
 ---
 
-**Document Version:** 1.0
-**Last Updated:** 2025-02-03
-**Next Review:** 2025-02-15
+**Document Version:** 1.1
+**Last Updated:** 2026-02-10
+**Next Review:** 2026-02-15
+**Key Milestone:** Edge case hardening complete (25 fixes, 88/88 tests passing)

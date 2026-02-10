@@ -418,7 +418,62 @@ class TestVideoReIDPipeline:
 - Focus on critical paths (matching, validation)
 - Use `pytest --cov=src/reid_research --cov-report=html`
 
-## 8. Performance & Optimization
+## 8. Edge Case Handling & Robustness Patterns
+
+### Degenerate Input Guards
+
+```python
+# Reject degenerate bboxes early
+if bbox[2] - bbox[0] <= 0 or bbox[3] - bbox[1] <= 0:
+    return None  # or 1x1 fallback
+
+# IoU division guard
+union = intersection + area1 + area2 - intersection
+if union <= 1e-8:
+    return 0.0  # Avoid div-by-zero
+
+# NaN prevention in distance calculations
+col_max = np.clip(col_max, 1e-8, 1.0)  # Clamp to prevent collapse
+```
+
+### Feature Normalization & Drift Prevention
+
+```python
+# Re-normalize EMA features after update (prevent drift)
+avg_feature = avg_feature / (np.linalg.norm(avg_feature) + 1e-8)
+
+# Deterministic tie-breaking (no randomness)
+if votes_a == votes_b:
+    return min(id_a, id_b)  # Prefer smaller ID
+
+# Validate array shapes before processing
+if features is None or features.size == 0:
+    return empty_result
+```
+
+### GPU Resource Management
+
+```python
+# Pool GPU resources across rebuilds (prevent leaks)
+self.gpu_resources = faiss.StandardGpuResources()
+# Reuse on subsequent rebuilds, not allocated each time
+
+# Clear stale entries periodically
+if frame_count % 300 == 0:
+    self._cleanup_stale_motion()
+    self._cleanup_stale_thumbnails()
+```
+
+### Configuration Validation
+
+```python
+# Reject unknown keys (extra="forbid" in Pydantic)
+class ReIDConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # Unknown YAML keys now raise validation error
+```
+
+## 9. Performance & Optimization
 
 ### Numpy Vectorization
 
@@ -567,7 +622,32 @@ mypy src/ --ignore-missing-imports
 
 **Enforcement:** Automate via pre-commit hooks or CI/CD pipeline.
 
-## 12. API Consistency
+## 12. Lookup & Complexity Optimization
+
+### O(1) vs O(n) Tradeoffs
+
+```python
+# Bad: O(n) list search
+try:
+    idx = self.ids.index(target_id)  # Linear scan
+except ValueError:
+    idx = -1
+
+# Good: O(1) dict lookup
+idx = self.id_to_index.get(target_id, -1)
+```
+
+### Eager Cache Invalidation
+
+```python
+# Rebuild k-NN cache after significant changes (10+)
+if changes_since_rebuild > 10:
+    self.rebuild_knn_cache()
+
+# Don't wait for periodic timer if data volatile
+```
+
+## 13. API Consistency
 
 ### Public Interface
 
@@ -631,6 +711,7 @@ class GalleryConfig(BaseModel):
 
 ---
 
-**Document Version:** 1.0
-**Last Updated:** 2025-02-03
-**Total Codebase LOC:** 3,444
+**Document Version:** 1.1
+**Last Updated:** 2026-02-10
+**Total Codebase LOC:** 3,700+ (post-robustness hardening)
+**Key Patterns:** Degenerate input guards, feature normalization, GPU resource pooling, config validation, O(1) lookups, eager cache invalidation, deterministic tie-breaking, stale entry cleanup
